@@ -1,0 +1,654 @@
+#include <Arduino.h>
+
+#define DEBUG 1
+
+// Pins
+#define ROT_DIR_PIN            5
+#define ROT_STEP_PIN           18
+#define ROT_LIMIT_SWITCH_PIN   22
+
+#define LIFT_DIR_PIN           16
+#define LIFT_STEP_PIN          17
+#define LIFT_LIMIT_SWITCH_PIN  23
+
+// Direction mapping
+const bool LIFT_DIR_HIGH_FOR_POSITIVE = true;   // lifter: delta > 0 => HIGH
+const bool ROT_DIR_HIGH_FOR_POSITIVE  = false;  // rotator: delta > 0 => LOW
+const bool ROT_HOME_DIR_HIGH = false;
+const bool LIFT_HOME_DIR_HIGH = true;
+
+// Motion config
+const long ROT_TOTAL_REV_STEPS = 200L * 8L;
+const double ROT_GEAR_RATIO = 49.0 / 80.0;
+const double ROT_TOTAL_STEPS_WITH_RATIO = ROT_TOTAL_REV_STEPS / ROT_GEAR_RATIO;
+
+const uint8_t TOTAL_STEPS = 8;
+const long LIFTER_TOP_TICKS = 0;
+const long LIFTER_PRE_SUBMERGE_TICKS = -1292;
+const long LIFTER_DESCEND_TARGET_TICKS = -3000;
+const long LIFTER_OSC_TICKS = 4000;
+const long LIFTER_AUTOMATION_BOTTOM_TICKS = -45800L;
+
+const double SECOND_PHASE_ANGLE = 39;
+
+
+// Bottom dwell time per phase. Phase 1 stays at home and does not descend.
+const uint32_t LIFTER_BOTTOM_DWELL_MS[8] = {
+  0,
+  500,
+  1000,
+  1000,
+  1000,
+  1000,
+  1000,
+  1000
+};
+
+// pulse timings
+const unsigned int ROT_STEP_PULSE_HIGH_US  = 400;
+const unsigned int ROT_STEP_PULSE_LOW_US   = 200;
+const unsigned int LIFT_STEP_PULSE_HIGH_US = 40;
+const unsigned int LIFT_STEP_PULSE_LOW_US  = 40;
+
+const long HOMING_CHUNK_STEPS = 3000;
+const uint32_t LIFTER_OSC_INTERVAL_MS = 120;
+const uint32_t LIFTER_UP_MAX_TIME_MS = 20000;
+
+// State
+long rotCurrentTicks = 0;
+long liftCurrentTicks = 0;
+double rotCurrentAngleDeg = 0.0;
+bool rotIsHomed = false;
+bool liftIsHomed = false;
+bool isEnabled = false;
+uint8_t currentStepIndex = 0;
+
+// Manual mode state
+bool manualActive = false;
+int requestedPhase = 0;
+bool stopRequested = false;
+bool resetRequested = false;
+bool automationActive = false;
+String emergencyInput;
+
+void resetAllAxes();
+
+bool pollEmergencyCommand() {
+  while (Serial.available() > 0) {
+    char inputChar = (char)Serial.read();
+    if (inputChar == '\n' || inputChar == '\r') {
+      emergencyInput.trim();
+      emergencyInput.toUpperCase();
+
+      if (emergencyInput == "STOP") {
+        stopRequested = true;
+        Serial.println(F("STOP received. Motion will stop immediately."));
+      } else if (emergencyInput == "R") {
+        stopRequested = true;
+        resetRequested = true;
+        Serial.println(F("R received. Motion will stop and reset immediately."));
+      }
+
+      emergencyInput = "";
+    } else if (inputChar >= 32) {
+      emergencyInput += inputChar;
+    }
+  }
+
+  return stopRequested;
+}
+
+long angleToTicks(double angle, double stepsPerRev) {
+  // Keep ticks negative for CCW rotation, but keep the displayed angle positive.
+  return lround(-angle * (stepsPerRev / 360.0));
+}
+
+double ticksToAngle(long ticks, double stepsPerRev) {
+  return -((double)ticks * (360.0 / stepsPerRev));
+}
+
+long targetAngleForStepIndex(uint8_t stepIndex) {
+  if (stepIndex == 0) return 0;
+  return (long)(SECOND_PHASE_ANGLE + ((double)(stepIndex - 1) * 45.0));
+}
+
+long targetAngleForPhaseNumber(uint8_t phaseNumber) {
+  if (phaseNumber <= 1) return 0;
+  return targetAngleForStepIndex((uint8_t)(phaseNumber - 1));
+}
+
+void stepPulse(int stepPin, unsigned int hi, unsigned int lo) {
+  digitalWrite(stepPin, HIGH);
+  delayMicroseconds(hi);
+  digitalWrite(stepPin, LOW);
+  delayMicroseconds(lo);
+}
+
+bool runMotorToTargetWithMap(int stepPin, int dirPin, long target, long &current,
+                             bool dirHighForPositive, unsigned int hi, unsigned int lo) {
+  long delta = target - current;
+  if (delta == 0) return true;
+
+  digitalWrite(dirPin, (((delta > 0) == dirHighForPositive) ? HIGH : LOW));
+  long n = labs(delta);
+  for (long i = 0; i < n; i++) {
+    if (automationActive && pollEmergencyCommand()) return false;
+    stepPulse(stepPin, hi, lo);
+    current += delta > 0 ? 1 : -1;
+  }
+
+  return true;
+}
+
+bool resetPosChunk(int stepPin, int dirPin, int limitPin, bool homeDirHigh,
+                   long &currentRef, long maxSteps, unsigned int hi, unsigned int lo) {
+  if (digitalRead(limitPin) == HIGH) {
+    currentRef = 0;
+    return true;
+  }
+
+  digitalWrite(dirPin, homeDirHigh ? HIGH : LOW);
+
+  while (true) {
+    if (automationActive && pollEmergencyCommand()) return false;
+    if (digitalRead(limitPin) == HIGH) {
+      currentRef = 0;
+      return true;
+    }
+    stepPulse(stepPin, hi, lo);
+  }
+
+  return false;
+}
+
+bool delayWithEmergencyPoll(uint32_t durationMs) {
+  uint32_t startMs = millis();
+  while ((uint32_t)(millis() - startMs) < durationMs) {
+    if (automationActive && pollEmergencyCommand()) return false;
+    delay(1);
+  }
+  return true;
+}
+
+void homeLiftSafely() {
+  liftIsHomed = resetPosChunk(LIFT_STEP_PIN, LIFT_DIR_PIN, LIFT_LIMIT_SWITCH_PIN, LIFT_HOME_DIR_HIGH,
+                              liftCurrentTicks, HOMING_CHUNK_STEPS, LIFT_STEP_PULSE_HIGH_US, LIFT_STEP_PULSE_LOW_US);
+  if (liftIsHomed) {
+    liftCurrentTicks = 0;
+    Serial.println(F("Lift homed."));
+  } else {
+    Serial.println(F("Lift homing failed."));
+  }
+}
+
+void homeRotSafely() {
+  rotIsHomed = resetPosChunk(ROT_STEP_PIN, ROT_DIR_PIN, ROT_LIMIT_SWITCH_PIN, ROT_HOME_DIR_HIGH,
+                             rotCurrentTicks, HOMING_CHUNK_STEPS, ROT_STEP_PULSE_HIGH_US, ROT_STEP_PULSE_LOW_US);
+  if (rotIsHomed) {
+    rotCurrentTicks = 0;
+    rotCurrentAngleDeg = 0.0;
+    Serial.println(F("Rotator homed."));
+  } else {
+    Serial.println(F("Rotator homing failed."));
+  }
+}
+
+void homeBothSafely() {
+  // This safe order prevents the white pan handle from striking while rotating back to home.
+  homeLiftSafely();
+  if (!liftIsHomed) return;
+
+  homeRotSafely();
+  if (rotIsHomed) {
+    currentStepIndex = 0;
+    requestedPhase = 0;
+    manualActive = false;
+    Serial.println(F("System safe-home complete."));
+  }
+}
+
+void runManualPhase(int phaseIndex) {
+  if (!isEnabled) {
+    Serial.println(F("System is disabled. Send E first."));
+    return;
+  }
+
+  if (phaseIndex < 0) phaseIndex = 0;
+  if (phaseIndex > TOTAL_STEPS - 1) phaseIndex = TOTAL_STEPS - 1;
+
+  Serial.print(F("Phase-")); Serial.print(phaseIndex); Serial.println(F(" requested."));
+
+  // PHASE-1 is the only one that should fully reset for safety.
+  if (phaseIndex == 1) {
+    Serial.println(F("PHASE-1: resetting lift then rotator to home first."));
+    homeLiftSafely();
+    if (!liftIsHomed) {
+      Serial.println(F("Abort: lift not home."));
+      return;
+    }
+
+    homeRotSafely();
+    if (!rotIsHomed) {
+      Serial.println(F("Abort: rotator not home."));
+      return;
+    }
+  } else {
+    // Do not send the rotator back to zero for PHASE-3, PHASE-4, etc.
+    // Only ensure the machine is safely homed if it was never initialized before.
+    if (!liftIsHomed) {
+      Serial.println(F("Lift not homed. Resetting lift first."));
+      homeLiftSafely();
+      if (!liftIsHomed) {
+        Serial.println(F("Abort: lift not home."));
+        return;
+      }
+    }
+
+    if (!rotIsHomed) {
+      Serial.println(F("Rotator not homed. Resetting rotator first."));
+      homeRotSafely();
+      if (!rotIsHomed) {
+        Serial.println(F("Abort: rotator not home."));
+        return;
+      }
+    }
+  }
+
+  currentStepIndex = (uint8_t)phaseIndex;
+  requestedPhase = phaseIndex;
+  manualActive = true;
+
+  long targetAngle = targetAngleForStepIndex(currentStepIndex);
+  long targetTicks = angleToTicks((double)targetAngle, ROT_TOTAL_STEPS_WITH_RATIO);
+
+  Serial.print(F("Moving to phase angle: ")); Serial.print(targetAngle);
+  Serial.print(F(" deg (ticks: ")); Serial.print(targetTicks); Serial.println(F(")"));
+
+  runMotorToTargetWithMap(ROT_STEP_PIN, ROT_DIR_PIN, targetTicks, rotCurrentTicks,
+                          ROT_DIR_HIGH_FOR_POSITIVE, ROT_STEP_PULSE_HIGH_US, ROT_STEP_PULSE_LOW_US);
+  rotCurrentTicks = targetTicks;
+  rotCurrentAngleDeg = ticksToAngle(rotCurrentTicks, ROT_TOTAL_STEPS_WITH_RATIO);
+}
+
+void runLiftResetCommand() {
+  if (!isEnabled) {
+    Serial.println(F("Cannot reset lift: system is disabled. Send E first."));
+    return;
+  }
+
+  Serial.println(F("LIFTER-RESET received."));
+  homeLiftSafely();
+}
+
+void runLiftTicksCommand(long rawTicks) {
+  if (!isEnabled) {
+    Serial.println(F("Cannot move lift: system is disabled. Send E first."));
+    return;
+  }
+
+  if (!liftIsHomed) {
+    Serial.println(F("Lift is not homed. Use LIFTER-RESET or HOME first."));
+    return;
+  }
+
+  // User input is the absolute target position in ticks.
+  // For downward motion, the machine uses negative ticks, so a positive command becomes a negative target.
+  long target = (rawTicks >= 0) ? -abs(rawTicks) : rawTicks;
+
+  Serial.print(F("Lifter move requested to target tick: ")); Serial.print(target);
+  Serial.print(F(" (input was: ")); Serial.print(rawTicks); Serial.println(F(")"));
+
+  runMotorToTargetWithMap(LIFT_STEP_PIN, LIFT_DIR_PIN, target, liftCurrentTicks,
+                          LIFT_DIR_HIGH_FOR_POSITIVE, LIFT_STEP_PULSE_HIGH_US, LIFT_STEP_PULSE_LOW_US);
+  liftCurrentTicks = target;
+}
+
+void runSetAngleCommand(double angleDeg) {
+  if (!isEnabled) {
+    Serial.println(F("Cannot move rotator: system is disabled. Send E first."));
+    return;
+  }
+
+  if (!rotIsHomed) {
+    Serial.println(F("Rotator is not homed. Use HOME or H first."));
+    return;
+  }
+
+  // Keep angle input positive for user convenience, but convert to negative ticks
+  // for CCW movement, matching the actuator logic.
+  long targetTicks = angleToTicks(angleDeg, ROT_TOTAL_STEPS_WITH_RATIO);
+
+  Serial.print(F("SET-ANGLE received: ")); Serial.print(angleDeg, 2);
+  Serial.print(F(" deg -> internal ticks: ")); Serial.println(targetTicks);
+
+  runMotorToTargetWithMap(ROT_STEP_PIN, ROT_DIR_PIN, targetTicks, rotCurrentTicks,
+                          ROT_DIR_HIGH_FOR_POSITIVE, ROT_STEP_PULSE_HIGH_US, ROT_STEP_PULSE_LOW_US);
+  rotCurrentTicks = targetTicks;
+  rotCurrentAngleDeg = ticksToAngle(rotCurrentTicks, ROT_TOTAL_STEPS_WITH_RATIO);
+}
+
+bool shakeLifterAtBottom(uint32_t durationMs) {
+  if (durationMs == 0) return true;
+
+  const long shakeTopTicks = LIFTER_AUTOMATION_BOTTOM_TICKS + LIFTER_OSC_TICKS;
+  uint32_t shakeStartMs = millis();
+
+  while ((uint32_t)(millis() - shakeStartMs) < durationMs) {
+    if (pollEmergencyCommand()) return false;
+    Serial.print(F("Shaking lifter up to ")); Serial.print(shakeTopTicks);
+    Serial.println(F(" ticks."));
+    if (!runMotorToTargetWithMap(LIFT_STEP_PIN, LIFT_DIR_PIN, shakeTopTicks, liftCurrentTicks,
+                                 LIFT_DIR_HIGH_FOR_POSITIVE, LIFT_STEP_PULSE_HIGH_US, LIFT_STEP_PULSE_LOW_US)) return false;
+    if (!delayWithEmergencyPoll(LIFTER_OSC_INTERVAL_MS)) return false;
+
+    Serial.print(F("Shaking lifter down to ")); Serial.print(LIFTER_AUTOMATION_BOTTOM_TICKS);
+    Serial.println(F(" ticks."));
+    if (!runMotorToTargetWithMap(LIFT_STEP_PIN, LIFT_DIR_PIN, LIFTER_AUTOMATION_BOTTOM_TICKS, liftCurrentTicks,
+                                 LIFT_DIR_HIGH_FOR_POSITIVE, LIFT_STEP_PULSE_HIGH_US, LIFT_STEP_PULSE_LOW_US)) return false;
+    if (!delayWithEmergencyPoll(LIFTER_OSC_INTERVAL_MS)) return false;
+  }
+
+  // Always finish at the defined bottom target before the next command.
+  if (liftCurrentTicks != LIFTER_AUTOMATION_BOTTOM_TICKS) {
+    if (!runMotorToTargetWithMap(LIFT_STEP_PIN, LIFT_DIR_PIN, LIFTER_AUTOMATION_BOTTOM_TICKS, liftCurrentTicks,
+                                 LIFT_DIR_HIGH_FOR_POSITIVE, LIFT_STEP_PULSE_HIGH_US, LIFT_STEP_PULSE_LOW_US)) return false;
+  }
+
+  return true;
+}
+
+bool handleAutomationInterrupt() {
+  if (!stopRequested) return false;
+
+  bool shouldReset = resetRequested;
+  stopRequested = false;
+  resetRequested = false;
+  manualActive = false;
+
+  if (shouldReset) {
+    Serial.println(F("Emergency reset started: lift first, then rotator."));
+    resetAllAxes();
+  } else {
+    Serial.println(F("Automation stopped. Axes remain at their current positions."));
+  }
+
+  return true;
+}
+
+bool runAutomatedPhase(int phaseNumber, uint32_t customDwellMs = 0, bool useCustomDwell = false) {
+  if (!isEnabled) {
+    Serial.println(F("Cannot run automation: system is disabled. Send E first."));
+    return false;
+  }
+
+  automationActive = true;
+
+  if (phaseNumber < 1) phaseNumber = 1;
+  if (phaseNumber > TOTAL_STEPS) phaseNumber = TOTAL_STEPS;
+
+  if (useCustomDwell) {
+    Serial.print(F("GO-")); Serial.print(phaseNumber); Serial.print(F("-")
+    ); Serial.print(customDwellMs); Serial.println(F(" requested."));
+  } else {
+    Serial.print(F("AUTOMATE-")); Serial.print(phaseNumber); Serial.println(F(" requested."));
+  }
+
+  if (!liftIsHomed) {
+    Serial.println(F("Lift not homed. Homing lift before automation."));
+    homeLiftSafely();
+    if (!liftIsHomed) {
+      Serial.println(F("Abort: lift not home."));
+      automationActive = false;
+      return false;
+    }
+  }
+
+  if (!rotIsHomed) {
+    Serial.println(F("Rotator not homed. Homing rotator before automation."));
+    homeRotSafely();
+    if (!rotIsHomed) {
+      Serial.println(F("Abort: rotator not home."));
+      automationActive = false;
+      return false;
+    }
+  }
+
+  long targetAngle = targetAngleForPhaseNumber((uint8_t)phaseNumber);
+  long targetTicks = angleToTicks((double)targetAngle, ROT_TOTAL_STEPS_WITH_RATIO);
+
+  currentStepIndex = (uint8_t)(phaseNumber == 1 ? 0 : phaseNumber - 1);
+  requestedPhase = phaseNumber;
+  manualActive = true;
+
+  Serial.print(F("Moving to phase angle: ")); Serial.print(targetAngle);
+  Serial.print(F(" deg (ticks: ")); Serial.print(targetTicks); Serial.println(F(")"));
+
+  if (!runMotorToTargetWithMap(ROT_STEP_PIN, ROT_DIR_PIN, targetTicks, rotCurrentTicks,
+                               ROT_DIR_HIGH_FOR_POSITIVE, ROT_STEP_PULSE_HIGH_US, ROT_STEP_PULSE_LOW_US)) {
+    handleAutomationInterrupt();
+    automationActive = false;
+    return false;
+  }
+  rotCurrentTicks = targetTicks;
+  rotCurrentAngleDeg = ticksToAngle(rotCurrentTicks, ROT_TOTAL_STEPS_WITH_RATIO);
+
+  if (phaseNumber == 1) {
+    Serial.println(F("AUTOMATE-1: phase 1 initial position - lifter remains home."));
+    bool interrupted = handleAutomationInterrupt();
+    automationActive = false;
+    return !interrupted;
+  }
+
+  Serial.print(F("Descending lifter to automation bottom target: ")); Serial.print(LIFTER_AUTOMATION_BOTTOM_TICKS);
+  Serial.println(F(" ticks."));
+
+  if (!runMotorToTargetWithMap(LIFT_STEP_PIN, LIFT_DIR_PIN, LIFTER_AUTOMATION_BOTTOM_TICKS, liftCurrentTicks,
+                               LIFT_DIR_HIGH_FOR_POSITIVE, LIFT_STEP_PULSE_HIGH_US, LIFT_STEP_PULSE_LOW_US)) {
+    handleAutomationInterrupt();
+    return false;
+  }
+
+  // The step loop above is blocking, so the dwell timer starts only after the
+  // final lifter step has been issued and the target position is recorded.
+  Serial.print(F("Lifter reached automation target: ")); Serial.print(liftCurrentTicks);
+  Serial.println(F(" ticks. Starting phase dwell timer."));
+
+  uint32_t dwellMs = useCustomDwell ? customDwellMs : LIFTER_BOTTOM_DWELL_MS[phaseNumber - 1];
+  if (dwellMs > 0) {
+    Serial.print(F("Shaking lifter for ")); Serial.print(dwellMs);
+    Serial.println(F(" ms."));
+    if (!shakeLifterAtBottom(dwellMs)) {
+      handleAutomationInterrupt();
+      return false;
+    }
+    Serial.println(F("Phase timer complete. Returning lifter to home."));
+  } else {
+    Serial.println(F("Bottom dwell is 0 ms for this phase."));
+  }
+
+  homeLiftSafely();
+  if (!liftIsHomed) {
+    Serial.println(F("Automation phase completed, but lifter homing failed."));
+    return false;
+  }
+
+  Serial.println(F("Automation phase complete. Lifter is home."));
+  bool interrupted = handleAutomationInterrupt();
+  automationActive = false;
+  return !interrupted;
+}
+
+bool runFullAutomation() {
+  automationActive = true;
+  for (int phaseNumber = 1; phaseNumber <= TOTAL_STEPS; phaseNumber++) {
+    Serial.print(F("FULL AUTOMATION: starting phase ")); Serial.println(phaseNumber);
+    if (!runAutomatedPhase(phaseNumber)) {
+      automationActive = false;
+      return false;
+    }
+    if (handleAutomationInterrupt()) return false;
+  }
+
+  automationActive = false;
+  Serial.println(F("FULL AUTOMATION complete."));
+  return true;
+}
+
+void printSystemState() {
+  Serial.print(F("Enabled: ")); Serial.println(isEnabled ? F("YES") : F("NO"));
+  Serial.print(F("Lift home: ")); Serial.println(liftIsHomed ? F("YES") : F("NO"));
+  Serial.print(F("Rot home: ")); Serial.println(rotIsHomed ? F("YES") : F("NO"));
+  Serial.print(F("Lift ticks: ")); Serial.println(liftCurrentTicks);
+  Serial.print(F("Rot ticks: ")); Serial.println(rotCurrentTicks);
+  Serial.print(F("Current rotation angle: ")); Serial.print(rotCurrentAngleDeg, 2);
+  Serial.println(F(" deg"));
+}
+
+void resetAllAxes() {
+  if (!isEnabled) {
+    Serial.println(F("Cannot reset all: system is disabled. Send E first."));
+    return;
+  }
+
+  Serial.println(F("RESET-ALL received. Resetting lift first..."));
+  homeLiftSafely();
+  if (!liftIsHomed) {
+    Serial.println(F("Abort: lift reset failed."));
+    return;
+  }
+
+  Serial.println(F("Resetting rotator next..."));
+  homeRotSafely();
+  if (!rotIsHomed) {
+    Serial.println(F("Abort: rotator reset failed."));
+    return;
+  }
+
+  currentStepIndex = 0;
+  requestedPhase = 0;
+  manualActive = false;
+  rotCurrentAngleDeg = 0.0;
+  Serial.println(F("All axes reset complete."));
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(ROT_LIMIT_SWITCH_PIN, INPUT_PULLUP);
+  pinMode(ROT_STEP_PIN, OUTPUT);
+  pinMode(ROT_DIR_PIN, OUTPUT);
+
+  pinMode(LIFT_LIMIT_SWITCH_PIN, INPUT_PULLUP);
+  pinMode(LIFT_STEP_PIN, OUTPUT);
+  pinMode(LIFT_DIR_PIN, OUTPUT);
+
+  Serial.println(F("Manual controller ready."));
+  Serial.println(F("Commands: E, D, H, HOME, STATE, STATUS, RESET-ALL, STOP, R, LIFTER-RESET, LIFTER-3000, SET-38, PHASE-1 .. PHASE-8, AUTOMATE-1 .. AUTOMATE-8, AUTOMATE-FULL, GO-2-5000"));
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    command.toUpperCase();
+
+    if (command == "E") {
+      isEnabled = true;
+      Serial.println(F("System enabled."));
+    }
+    else if (command == "D") {
+      isEnabled = false;
+      manualActive = false;
+      Serial.println(F("System disabled."));
+    }
+    else if (command == "H" || command == "HOME") {
+      if (!isEnabled) {
+        Serial.println(F("Cannot home: system is disabled. Send E first."));
+      } else {
+        homeBothSafely();
+      }
+    }
+    else if (command == "STATE" || command == "STATUS") {
+      printSystemState();
+    }
+    else if (command == "RESET-ALL") {
+      resetAllAxes();
+    }
+    else if (command == "STOP") {
+      Serial.println(F("No automation is currently running."));
+    }
+    else if (command == "R") {
+      Serial.println(F("R received. Resetting immediately."));
+      resetAllAxes();
+    }
+    else if (command == "LIFTER-RESET") {
+      runLiftResetCommand();
+    }
+    else if (command.startsWith("LIFTER-")) {
+      String value = command.substring(7);
+      if (value.length() == 0) {
+        Serial.println(F("Invalid LIFTER command. Use LIFTER-RESET or LIFTER-3000."));
+      } else {
+        long liftTicks = value.toInt();
+        runLiftTicksCommand(liftTicks);
+      }
+    }
+    else if (command.startsWith("SET-")) {
+      String value = command.substring(4);
+      if (value.length() == 0) {
+        Serial.println(F("Invalid SET command. Use SET-38 or SET-90."));
+      } else {
+        double angleDeg = value.toFloat();
+        runSetAngleCommand(angleDeg);
+      }
+    }
+    else if (command == "AUTOMATE-FULL") {
+      if (!isEnabled) {
+        Serial.println(F("Cannot run full automation: system is disabled. Send E first."));
+      } else {
+        runFullAutomation();
+      }
+    }
+    else if (command.startsWith("GO-")) {
+      if (!isEnabled) {
+        Serial.println(F("Cannot run GO automation: system is disabled. Send E first."));
+      } else {
+        String value = command.substring(3);
+        int separatorIndex = value.indexOf('-');
+        if (separatorIndex <= 0 || separatorIndex >= value.length() - 1) {
+          Serial.println(F("Invalid GO command. Use GO-2-5000."));
+        } else {
+          int phaseNumber = value.substring(0, separatorIndex).toInt();
+          long dwellMs = value.substring(separatorIndex + 1).toInt();
+          if (phaseNumber < 1 || phaseNumber > TOTAL_STEPS || dwellMs < 0) {
+            Serial.println(F("Invalid GO command. Phase must be 1-8 and time must be non-negative."));
+          } else {
+            runAutomatedPhase(phaseNumber, (uint32_t)dwellMs, true);
+          }
+        }
+      }
+    }
+    else if (command.startsWith("AUTOMATE-")) {
+      if (!isEnabled) {
+        Serial.println(F("Cannot run automation: system is disabled. Send E first."));
+      } else {
+        String value = command.substring(9);
+        int phaseNumber = value.toInt();
+        runAutomatedPhase(phaseNumber);
+      }
+    }
+    else if (command.startsWith("PHASE-")) {
+      if (!isEnabled) {
+        Serial.println(F("Cannot move phase: system is disabled. Send E first."));
+      } else {
+        String value = command.substring(6);
+        int phaseNumber = value.toInt();
+        runManualPhase(phaseNumber);
+      }
+    }
+    else {
+      Serial.println(F("Unknown command."));
+      Serial.println(F("Use: E, D, H, HOME, STATE, STATUS, RESET-ALL, STOP, R, LIFTER-RESET, LIFTER-3000, SET-38, PHASE-1 ... PHASE-8, AUTOMATE-1 ... AUTOMATE-8, AUTOMATE-FULL, GO-2-5000"));
+    }
+  }
+}
