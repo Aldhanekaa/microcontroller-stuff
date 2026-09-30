@@ -3,19 +3,18 @@
 
   Four DC motors use two L298N boards without PWM. Leave all four ENA/ENB
   jumpers installed. Board 1: roll_1 uses IN1/IN2, roll_2 uses IN3/IN4.
-  Board 2: roll_3 uses IN1/IN2, encoder_motor uses IN3/IN4.
+  Board 2: roll_3 uses IN1/IN2, motor_4 uses IN3/IN4.
   Five E18-D80NK sensors use INPUT_PULLUP and are assumed active LOW.
   Verify the output polarity and supply voltage of your exact sensors.
-  The fourth motor is encoder_motor; its encoder A/B signals use Mega D2/D3.
-  Power the encoder at its specified voltage and keep A/B at safe Mega levels.
+  The fourth motor is a regular DC motor, manually controlled for now.
   Button connects between BUTTON_PIN and GND; it is read by STATUS only.
-  Two servos are command controlled only; automation does not move them.
+  Two servos are command controlled only. An empty hook is called at ir_3
+  for future continuous-servo action; automation does not move them yet.
   Power motors, sensors, and servos from supplies suited to their ratings,
   with a common ground to the Mega. Do not power motors/servos from USB.
 
   Serial Monitor: 115200 baud, Newline or Both NL & CR.
-  Commands: E, D, AUTO, AUTOMATE-FULL, STOP, STATUS, SENSORS, ENCODER,
-            ENCODER-RESET, HELP,
+  Commands: E, D, AUTO, AUTOMATE-FULL, STOP, STATUS, SENSORS, HELP,
             MOTOR-1-ON/OFF through MOTOR-4-ON/OFF, ALL-ON, ALL-OFF,
             SERVO-1-1500, SERVO-2-1500 (pulse width in microseconds).
   Commands are case insensitive. E enables motion. STOP halts automation
@@ -48,7 +47,7 @@ enum AutoStage {
   AUTO_TO_IR_1,
   AUTO_TO_IR_2,
   AUTO_TO_IR_3,
-  AUTO_TO_ROLL_4,
+  AUTO_TO_IR_4,
   AUTO_FINAL_RUN,
   AUTO_FINAL_ROLL_1
 };
@@ -59,7 +58,7 @@ const char *stageName(AutoStage stage) {
     case AUTO_TO_IR_1: return "moving to ir_1";
     case AUTO_TO_IR_2: return "moving to ir_2";
     case AUTO_TO_IR_3: return "moving to ir_3";
-    case AUTO_TO_ROLL_4: return "moving to roll_4";
+    case AUTO_TO_IR_4: return "moving to ir_4";
     case AUTO_FINAL_RUN: return "roll_2 and roll_3 timed run";
     case AUTO_FINAL_ROLL_1: return "roll_1 timed run";
     default: return "idle";
@@ -67,19 +66,17 @@ const char *stageName(AutoStage stage) {
 }
 
 // Motor 1 and 2 reuse the first L298N pinout from the no-PWM test sketch.
-// Motor 4 has the encoder, and is manual-control only in this version.
+// Motor 4 is a regular DC motor, and is manual-control only in this version.
 const MotorPins MOTORS[4] = {
   {"roll_1", 7, 8}, {"roll_2", 9, 10},
-  {"roll_3", 24, 25}, {"encoder_motor", 26, 27}
+  {"roll_3", 24, 25}, {"motor_4", 26, 27}
 };
 const SensorPin SENSORS[5] = {
   {"ir_1", 30}, {"ir_2", 31}, {"ir_3", 32},
-  {"roll_4", 33}, {"ir_rotation_trigger", 34}
+  {"ir_4", 33}, {"ir_rotation_trigger", 34}
 };
 const uint8_t BUTTON_PIN = 35;
 const uint8_t SERVO_PINS[2] = {40, 41};
-const uint8_t ENCODER_A_PIN = 2;
-const uint8_t ENCODER_B_PIN = 3;
 const uint8_t SENSOR_ACTIVE_LEVEL = LOW;
 const uint8_t BUTTON_PRESSED_LEVEL = LOW;
 
@@ -88,7 +85,7 @@ const MotorDirection ROLL_1_DIRECTION = MOTOR_FORWARD;
 const MotorDirection ROLL_2_FIRST_PAIR_DIRECTION = MOTOR_FORWARD;
 const MotorDirection ROLL_2_SECOND_PAIR_DIRECTION = MOTOR_FORWARD;
 const MotorDirection ROLL_3_DIRECTION = MOTOR_FORWARD;
-const MotorDirection ENCODER_MOTOR_MANUAL_DIRECTION = MOTOR_FORWARD;
+const MotorDirection MOTOR_4_MANUAL_DIRECTION = MOTOR_FORWARD;
 
 const unsigned long SENSOR_DEBOUNCE_MS = 30UL;
 const unsigned long SENSOR_WAIT_TIMEOUT_MS = 60000UL;  // Set 0 to disable.
@@ -110,44 +107,6 @@ bool sensorTiming = false;
 char commandBuffer[48];
 uint8_t commandLength = 0;
 bool discardingCommand = false;
-volatile long encoderTicks = 0;
-volatile unsigned long encoderInvalidTransitions = 0;
-volatile uint8_t previousEncoderState = 0;
-
-// updateEncoder: Count valid quadrature A/B edges for the fourth motor.
-// This interrupt function runs when either encoder signal changes.
-void updateEncoder() {
-  uint8_t state = (digitalRead(ENCODER_A_PIN) << 1) |
-                  digitalRead(ENCODER_B_PIN);
-  uint8_t transition = (previousEncoderState << 2) | state;
-  switch (transition) {
-    case 0x1: case 0x7: case 0xE: case 0x8: ++encoderTicks; break;
-    case 0x2: case 0xB: case 0xD: case 0x4: --encoderTicks; break;
-    default:
-      if (state != previousEncoderState) ++encoderInvalidTransitions;
-      break;
-  }
-  previousEncoderState = state;
-}
-
-// readEncoder: Atomically copy the tick and invalid-transition counters.
-void readEncoder(long &ticks, unsigned long &invalid) {
-  noInterrupts();
-  ticks = encoderTicks;
-  invalid = encoderInvalidTransitions;
-  interrupts();
-}
-
-// printEncoder: Show raw encoder ticks and invalid transitions on Serial.
-void printEncoder() {
-  long ticks;
-  unsigned long invalid;
-  readEncoder(ticks, invalid);
-  Serial.print(F("encoder_motor ticks: "));
-  Serial.print(ticks);
-  Serial.print(F(" | invalid transitions: "));
-  Serial.println(invalid);
-}
 
 // setMotor: Set one motor to OFF, FORWARD, or REVERSE using digital pins only.
 // index is 0..3. OFF sets both L298N inputs LOW, braking the motor while EN is on.
@@ -197,6 +156,12 @@ void TAKE_PICTURE_CYCLE() {
   // Keep future actions nonblocking so Serial STOP remains responsive.
 }
 
+// ACTIVATE_CONTINUOUS_SERVO: Placeholder called once when ir_3 is reached.
+// Add the tested continuous-servo action here later; no servo moves yet.
+void ACTIVATE_CONTINUOUS_SERVO() {
+  // TODO: add the tested continuous-servo action here.
+}
+
 // MODULE_1_STOP: Placeholder called after the 20-second roll_2/roll_3 run.
 void MODULE_1_STOP() {
   // TODO: add the later module handoff/stop actions here.
@@ -210,7 +175,7 @@ int8_t stageSensorIndex(AutoStage stage) {
     case AUTO_TO_IR_1: return 0;
     case AUTO_TO_IR_2: return 1;
     case AUTO_TO_IR_3: return 2;
-    case AUTO_TO_ROLL_4: return 3;
+    case AUTO_TO_IR_4: return 3;
     default: return -1;
   }
 }
@@ -238,7 +203,7 @@ void enterStage(AutoStage next) {
       setMotor(1, ROLL_2_FIRST_PAIR_DIRECTION);
       break;
     case AUTO_TO_IR_3:
-    case AUTO_TO_ROLL_4:
+    case AUTO_TO_IR_4:
     case AUTO_FINAL_RUN:
       setMotor(1, ROLL_2_SECOND_PAIR_DIRECTION);
       setMotor(2, ROLL_3_DIRECTION);
@@ -279,17 +244,19 @@ void startAutomation() {
   enterStage(AUTO_TO_IR_1);
 }
 
-// finishSensorStage: Stop the pair, call the empty picture function once,
-// and begin the next sensor or timed stage.
+// finishSensorStage: Stop the pair and call the photo function once.
+// At ir_3, call the continuous-servo placeholder before the photo function.
+// Then begin the next sensor or timed stage.
 void finishSensorStage() {
   AutoStage completed = autoStage;
   stopAllMotors();
   Serial.print(F("Reached "));
   Serial.println(SENSORS[stageSensorIndex(completed)].name);
+  if (completed == AUTO_TO_IR_3) ACTIVATE_CONTINUOUS_SERVO();
   TAKE_PICTURE_CYCLE();
   if (completed == AUTO_TO_IR_1) enterStage(AUTO_TO_IR_2);
   else if (completed == AUTO_TO_IR_2) enterStage(AUTO_TO_IR_3);
-  else if (completed == AUTO_TO_IR_3) enterStage(AUTO_TO_ROLL_4);
+  else if (completed == AUTO_TO_IR_3) enterStage(AUTO_TO_IR_4);
   else enterStage(AUTO_FINAL_RUN);
 }
 
@@ -357,7 +324,6 @@ void printStatus() {
                    motorState[i] == MOTOR_FORWARD ? F("FORWARD") : F("REVERSE"));
   }
   printSensors();
-  printEncoder();
   for (uint8_t i = 0; i < 2; ++i) {
     Serial.print(F("servo_"));
     Serial.print(i + 1);
@@ -370,7 +336,7 @@ void printStatus() {
 // printHelp: List all supported serial commands and their arguments.
 void printHelp() {
   Serial.println(F("E | D | AUTO | AUTOMATE-FULL | STOP | STATUS | SENSORS"));
-  Serial.println(F("ENCODER | ENCODER-RESET | HELP"));
+  Serial.println(F("HELP"));
   Serial.println(F("MOTOR-1-ON/OFF ... MOTOR-4-ON/OFF | ALL-ON | ALL-OFF"));
   Serial.println(F("SERVO-1-1500 | SERVO-2-1500 (pulse us; configured range 1200..1800)"));
 }
@@ -401,22 +367,6 @@ void processCommand(char *command) {
     printSensors();
     return;
   }
-  if (strcmp(command, "ENCODER") == 0) {
-    printEncoder();
-    return;
-  }
-  if (strcmp(command, "ENCODER-RESET") == 0) {
-    if (motorState[3] != MOTOR_OFF) {
-      Serial.println(F("Stop motor 4 before resetting encoder counts."));
-      return;
-    }
-    noInterrupts();
-    encoderTicks = 0;
-    encoderInvalidTransitions = 0;
-    interrupts();
-    Serial.println(F("Encoder counts reset."));
-    return;
-  }
   if (strcmp(command, "HELP") == 0) {
     printHelp();
     return;
@@ -437,7 +387,7 @@ void processCommand(char *command) {
     setMotor(0, ROLL_1_DIRECTION);
     setMotor(1, ROLL_2_FIRST_PAIR_DIRECTION);
     setMotor(2, ROLL_3_DIRECTION);
-    setMotor(3, ENCODER_MOTOR_MANUAL_DIRECTION);
+    setMotor(3, MOTOR_4_MANUAL_DIRECTION);
     Serial.println(F("All four motors ON."));
     return;
   }
@@ -446,7 +396,7 @@ void processCommand(char *command) {
     uint8_t index = command[6] - '1';
     MotorDirection onDirection[4] = {
       ROLL_1_DIRECTION, ROLL_2_FIRST_PAIR_DIRECTION,
-      ROLL_3_DIRECTION, ENCODER_MOTOR_MANUAL_DIRECTION
+      ROLL_3_DIRECTION, MOTOR_4_MANUAL_DIRECTION
     };
     if (strcmp(command + 8, "ON") == 0) {
       setMotor(index, onDirection[index]);
@@ -524,12 +474,6 @@ void setup() {
   }
   for (uint8_t i = 0; i < 5; ++i) pinMode(SENSORS[i].pin, INPUT_PULLUP);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(ENCODER_A_PIN, INPUT_PULLUP);
-  pinMode(ENCODER_B_PIN, INPUT_PULLUP);
-  previousEncoderState = (digitalRead(ENCODER_A_PIN) << 1) |
-                         digitalRead(ENCODER_B_PIN);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_A_PIN), updateEncoder, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_B_PIN), updateEncoder, CHANGE);
   Serial.println(F("Module 1 semi-auto controller ready."));
   printHelp();
 }
