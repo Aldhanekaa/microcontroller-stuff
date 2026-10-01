@@ -91,14 +91,16 @@ jumpers on both boards. It uses these Mega 2560 pins:
 | L298N board 1: `roll_1`, `roll_2` | IN1/IN2 = D7/D8; IN3/IN4 = D9/D10 |
 | L298N board 2: `roll_3`, `motor_4` picture rotator | IN1/IN2 = D24/D25; IN3/IN4 = D26/D27 |
 | Roll IR sensors `ir_1` to `ir_4` | D30 to D33 |
-| Picture rotation IR / cutting IR | D34 / D43 |
+| Original v1 `ir_rotation_trigger` (status only) | D34 |
+| Picture-cycle E18 / cutting-cycle E18 | D29 / D43 |
 | Button / ButtonLED | D41 to GND / D39 (HIGH = on) |
 | Picture position servo / continuous cutting servo | D40 / D42 |
 
 The button pin and LED pin come from `button.ino`. The cutter servo uses D42
-because the v1 D41 servo signal conflicts with the button. `motor_4` and D34
-perform the rotation and position detection from `taking_picture_cycle.ino`.
-The separate D43 cutter IR input comes from `cutting_cycle.ino`. All IR inputs
+because the v1 D41 servo signal conflicts with the button. `motor_4` and the
+separate D29 picture E18 perform the rotation and position detection from
+`taking_picture_cycle.ino`. D34 remains the original v1 sensor for status
+reporting. The D43 cutting E18 comes from `cutting_cycle.ino`. All IR inputs
 assume LOW means triggered; confirm this with your actual sensor outputs.
 
 1. With the LED on, press the button. A 350 ms start cue keeps the LED on;
@@ -106,7 +108,7 @@ assume LOW means triggered; confirm this with your actual sensor outputs.
 2. At each `ir_1` through `ir_4`, the roll motors stop and the LED stays on.
    Press the button once to run one picture cycle. While that cycle runs, the
    LED blinks every `PHOTO_LED_BLINK_MS` (300 ms by default).
-3. Each picture cycle turns `motor_4` until `ir_rotation_trigger` goes clear
+3. Each picture cycle turns `motor_4` until `picture_cycle_e18` goes clear
    and then triggers. It stops the rotator, moves the position servo to 0
    degrees for 700 ms, then returns it to 30 degrees.
 4. After the first photo, `roll_1` and `roll_2` run to `ir_2`. After the second,

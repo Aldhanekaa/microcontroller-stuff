@@ -9,8 +9,10 @@
     roll_2 IN3/IN4 = D9/D10.
   L298N board 2 (ENA/ENB jumpers ON): roll_3 IN1/IN2 = D24/D25,
     motor_4 (picture rotator) IN3/IN4 = D26/D27.
-  IR sensors: ir_1..ir_4 = D30..D33, ir_rotation_trigger = D34,
-    cutting sensor = D43. Sensor outputs are assumed active LOW.
+  IR sensors: ir_1..ir_4 = D30..D33, legacy ir_rotation_trigger = D34,
+    picture-cycle E18 = D29, cutting-cycle E18 = D43.
+  The picture and cutting E18 sensors are separate inputs. Sensor outputs
+  are assumed active LOW.
   Button = D41 to GND (INPUT_PULLUP); ButtonLED = D39 (HIGH = ON).
   Position servo = D40; continuous cutting servo = D42. D42 replaces the
   old D41 servo signal because button.ino uses D41 for the button.
@@ -47,8 +49,9 @@ const MotorPins MOTORS[4] = {
 const SensorPin ROLL_SENSORS[4] = {
   {"ir_1", 27}, {"ir_2", 23}, {"ir_3", 43}, {"ir_4", 25}
 };
-const uint8_t ROTATION_SENSOR_PIN = 34;
-const uint8_t CUT_SENSOR_PIN = 43;
+// const uint8_t IR_ROTATION_TRIGGER_PIN = 34;  // Original v1 sensor; status only.
+const uint8_t PICTURE_CYCLE_E18_PIN = 29;    // taking_picture_cycle e18_sensor.
+const uint8_t CUTTING_CYCLE_E18_PIN = 43;    // cutting_cycle E18_SENSOR_PIN.
 const uint8_t BUTTON_PIN = 41;
 const uint8_t BUTTON_LED_PIN = 39;
 const uint8_t POSITION_SERVO_PIN = 40;
@@ -300,11 +303,11 @@ void updateRollToStation() {
 }
 
 // startPictureCycle: Port the picture sketch's reset-to-clear/trigger logic.
-// motor_4 turns in the source sketch's LOW/HIGH direction until D34 triggers.
+// motor_4 turns in the source sketch's LOW/HIGH direction until D29 triggers.
 void startPictureCycle() {
   positionServo.write(POSITION_INITIAL_ANGLE);
   setMotor(3, ROTATOR_DIRECTION);
-  runState = isActive(ROTATION_SENSOR_PIN) ? PHOTO_WAIT_CLEAR : PHOTO_ROTATING;
+  runState = isActive(PICTURE_CYCLE_E18_PIN) ? PHOTO_WAIT_CLEAR : PHOTO_ROTATING;
   stateStartedMs = millis();
   sensorLowTiming = false;
   setButtonLed(false);
@@ -344,11 +347,11 @@ void finishPictureCycle() {
 // 700 ms, and restore 30 deg. The timeout also covers waiting for clear.
 void updatePictureCycle() {
   unsigned long now = millis();
-  if (runState == PHOTO_WAIT_CLEAR && !isActive(ROTATION_SENSOR_PIN)) {
+  if (runState == PHOTO_WAIT_CLEAR && !isActive(PICTURE_CYCLE_E18_PIN)) {
     runState = PHOTO_ROTATING;
     Serial.println(F("Rotation sensor cleared; awaiting next trigger."));
   } else if (runState == PHOTO_ROTATING) {
-    if (isActive(ROTATION_SENSOR_PIN)) {
+    if (isActive(PICTURE_CYCLE_E18_PIN)) {
       if (!sensorLowTiming) {
         sensorLowTiming = true;
         sensorLowStartedMs = now;
@@ -394,7 +397,7 @@ void updateCuttingCycle() {
       startCuttingMotion();
       return;
     }
-    if (!isActive(CUT_SENSOR_PIN)) {
+    if (!isActive(CUTTING_CYCLE_E18_PIN)) {
       cuttingSensorWasClear = true;
     } else if (cuttingSensorWasClear) {
       cuttingSensorWasClear = false;
@@ -437,7 +440,7 @@ void updateFinalRun() {
   }
 }
 
-// printSensors: Show all six sensor levels plus the debounced button state.
+// printSensors: Show four roll IRs, the original v1 IR, and both cycle E18s.
 void printSensors() {
   for (uint8_t i = 0; i < 4; ++i) {
     Serial.print(ROLL_SENSORS[i].name);
@@ -445,9 +448,11 @@ void printSensors() {
     Serial.println(isActive(ROLL_SENSORS[i].pin) ? F("TRIGGERED") : F("clear"));
   }
   Serial.print(F("ir_rotation_trigger: "));
-  Serial.println(isActive(ROTATION_SENSOR_PIN) ? F("TRIGGERED") : F("clear"));
-  Serial.print(F("ir_cut_trigger: "));
-  Serial.println(isActive(CUT_SENSOR_PIN) ? F("TRIGGERED") : F("clear"));
+  // Serial.println(isActive(IR_ROTATION_TRIGGER_PIN) ? F("TRIGGERED") : F("clear"));
+  Serial.print(F("picture_cycle_e18: "));
+  Serial.println(isActive(PICTURE_CYCLE_E18_PIN) ? F("TRIGGERED") : F("clear"));
+  Serial.print(F("cutting_cycle_e18: "));
+  Serial.println(isActive(CUTTING_CYCLE_E18_PIN) ? F("TRIGGERED") : F("clear"));
   Serial.print(F("button: "));
   Serial.println(buttonStable == LOW ? F("PRESSED") : F("released"));
 }
@@ -623,8 +628,9 @@ void setup() {
     setMotor(i, MOTOR_OFF);
     pinMode(ROLL_SENSORS[i].pin, INPUT_PULLUP);
   }
-  pinMode(ROTATION_SENSOR_PIN, INPUT_PULLUP);
-  pinMode(CUT_SENSOR_PIN, INPUT_PULLUP);
+  // pinMode(IR_ROTATION_TRIGGER_PIN, INPUT_PULLUP);
+  pinMode(PICTURE_CYCLE_E18_PIN, INPUT_PULLUP);
+  pinMode(CUTTING_CYCLE_E18_PIN, INPUT_PULLUP);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(BUTTON_LED_PIN, OUTPUT);
   buttonLastRaw = digitalRead(BUTTON_PIN);
@@ -644,7 +650,7 @@ void loop() {
   stopCommandThisLoop = false;
   pollSerial();
   bool pressed = buttonPressed();
-  if (!isActive(CUT_SENSOR_PIN)) cuttingSensorWasClear = true;
+  if (!isActive(CUTTING_CYCLE_E18_PIN)) cuttingSensorWasClear = true;
   if (!stopCommandThisLoop && pressed) {
     if (runState == READY) startFullAutomation();
     else if (runState == WAIT_PHOTO_BUTTON) startPictureCycle();
