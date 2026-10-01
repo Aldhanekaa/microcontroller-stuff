@@ -7,13 +7,16 @@
   Signal wire -> D9. Use a separate power supply matching the servo rating
   and current demand; connect supply and Arduino grounds. Do not power it
   from the Arduino 5 V pin or USB. Keep moving parts clear.
-  Open Serial Monitor at 115200 baud.
+  Open Serial Monitor at 115200 baud and set line ending to Newline.
 
-  Parameters to edit: SERVO_PIN, STOP_US (neutral pulse, usually near 1500),
-  FORWARD_US and REVERSE_US (pulse widths in microseconds), RUN_MS, REST_MS.
-  Start with the modest default offset from neutral. If it creeps at stop,
-  adjust STOP_US a few microseconds at a time. Direction may be reversed by
-  the servo's mounting or model. There is no angular position feedback here.
+  Commands:
+    F 3000  Rotate forward for 3000 milliseconds.
+    R 3000  Rotate reverse for 3000 milliseconds.
+    B       Reverse the most recent movement for the same duration.
+    S       Stop immediately.
+
+  B is only an approximate return because this servo has no position feedback.
+  If it creeps at stop, adjust STOP_US a few microseconds at a time.
 */
 
 #include <Arduino.h>
@@ -23,40 +26,96 @@ const uint8_t SERVO_PIN = 9;
 const int STOP_US = 1500;
 const int FORWARD_US = 1600;
 const int REVERSE_US = 1400;
-const unsigned long RUN_MS = 2000;
-const unsigned long REST_MS = 1500;
+const unsigned long MAX_RUN_MS = 60000;
+const size_t COMMAND_LENGTH = 20;
 Servo testServo;
+char command[COMMAND_LENGTH];
+size_t commandLength = 0;
+unsigned long lastRunMs = 0;
+int lastPulseUs = FORWARD_US;
+unsigned long movementStartedAt = 0;
+bool movementActive = false;
 
-// stopServo: Send neutral pulses and wait REST_MS for motion to stop.
 void stopServo() {
+  movementActive = false;
   testServo.writeMicroseconds(STOP_US);
-  Serial.print(F("Stop pulse (us): "));
-  Serial.println(STOP_US);
-  delay(REST_MS);
+  Serial.println(F("Servo stopped"));
 }
 
-// runServo: Send a speed/direction pulse for RUN_MS, then stop.
-// pulseUs is a pulse width in microseconds, not an angle.
-void runServo(int pulseUs) {
-  Serial.print(F("Run pulse (us): "));
-  Serial.println(pulseUs);
+void startServo(int pulseUs, unsigned long runMs) {
+  lastPulseUs = pulseUs;
+  lastRunMs = runMs;
+  movementStartedAt = millis();
+  movementActive = true;
   testServo.writeMicroseconds(pulseUs);
-  delay(RUN_MS);
-  stopServo();
+  Serial.print(F("Running for "));
+  Serial.print(runMs);
+  Serial.println(F(" ms"));
 }
 
-// setup: Attach the servo, command neutral, and start Serial Monitor output.
+void updateMovement() {
+  if (movementActive && millis() - movementStartedAt >= lastRunMs) {
+    stopServo();
+  }
+}
+
+void processCommand() {
+  command[commandLength] = '\0';
+  char *commandType = strtok(command, " \t");
+  char *durationText = strtok(nullptr, " \t");
+
+  if (commandType == nullptr) {
+    return;
+  }
+
+  if (strcmp(commandType, "S") == 0) {
+    stopServo();
+  } else if (strcmp(commandType, "B") == 0) {
+    if (lastRunMs == 0) {
+      Serial.println(F("No previous movement to reverse"));
+    } else {
+      startServo(lastPulseUs == FORWARD_US ? REVERSE_US : FORWARD_US, lastRunMs);
+    }
+  } else if ((strcmp(commandType, "F") == 0 || strcmp(commandType, "R") == 0) && durationText != nullptr) {
+    char *endPointer;
+    long requestedMs = strtol(durationText, &endPointer, 10);
+    if (*endPointer != '\0' || requestedMs <= 0 || requestedMs > MAX_RUN_MS) {
+      Serial.println(F("Duration must be 1 to 60000 milliseconds"));
+    } else {
+      int pulseUs = strcmp(commandType, "F") == 0 ? FORWARD_US : REVERSE_US;
+      startServo(pulseUs, (unsigned long) requestedMs);
+    }
+  } else {
+    Serial.println(F("Use F 3000, R 3000, B, or S"));
+  }
+
+  commandLength = 0;
+}
+
+void readSerialCommand() {
+  while (Serial.available() > 0) {
+    char received = (char) Serial.read();
+    if (received == '\n' || received == '\r') {
+      if (commandLength > 0) {
+        processCommand();
+      }
+    } else if (commandLength < COMMAND_LENGTH - 1) {
+      command[commandLength++] = received;
+    } else {
+      commandLength = 0;
+      Serial.println(F("Command too long"));
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   testServo.attach(SERVO_PIN);
-  Serial.println(F("Continuous-rotation servo test starting"));
   stopServo();
+  Serial.println(F("Commands: F milliseconds, R milliseconds, B, S"));
 }
 
-// loop: Repeat short forward and reverse runs, stopping between them.
 void loop() {
-  runServo(FORWARD_US);
-  runServo(REVERSE_US);
-  Serial.println(F("Cycle complete; repeating in 3 seconds"));
-  delay(3000);
+  readSerialCommand();
+  updateMovement();
 }
