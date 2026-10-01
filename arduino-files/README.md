@@ -83,24 +83,23 @@ check the servo models before expanding that range.
 ## Module 1 v2: button, picture, and cutting automation
 
 Upload `module_1_semi_auto_v2.ino` from its same-named folder. The v1 sketch
-remains separate. V2 uses the v1 L298N motor pins and requires the ENA/ENB
-jumpers on both boards. It uses these Mega 2560 pins:
+remains separate. V2 requires the ENA/ENB jumpers on both L298N boards and
+uses these Mega 2560 pins:
 
 | Device | Pins |
 | --- | --- |
-| L298N board 1: `roll_1`, `roll_2` | IN1/IN2 = D7/D8; IN3/IN4 = D9/D10 |
-| L298N board 2: `roll_3`, `motor_4` picture rotator | IN1/IN2 = D24/D25; IN3/IN4 = D26/D27 |
-| Roll IR sensors `ir_1` to `ir_4` | D30 to D33 |
-| Original v1 `ir_rotation_trigger` (status only) | D34 |
-| Picture-cycle E18 / cutting-cycle E18 | D29 / D43 |
+| L298N board 1: `roll_1`, `roll_2` | IN1/IN2 = D13/D15; IN3/IN4 = D9/D11 |
+| L298N board 2: `roll_3`, `motor_4` picture rotator | IN1/IN2 = D19/D17; IN3/IN4 = D5/D7 |
+| Roll IR sensors `ir_1`, `ir_2`, `ir_3`, `ir_4` | D27, D23, D43, D25 |
+| Picture-cycle E18 / cutting-cycle E18 | D29 / D45 |
 | Button / ButtonLED | D41 to GND / D39 (HIGH = on) |
-| Picture position servo / continuous cutting servo | D40 / D42 |
+| Picture position servo / continuous cutting servo | D40 / D31 |
 
-The button pin and LED pin come from `button.ino`. The cutter servo uses D42
-because the v1 D41 servo signal conflicts with the button. `motor_4` and the
-separate D29 picture E18 perform the rotation and position detection from
-`taking_picture_cycle.ino`. D34 remains the original v1 sensor for status
-reporting. The D43 cutting E18 comes from `cutting_cycle.ino`. All IR inputs
+The button pin and LED pin come from `button.ino`. `motor_4` and the separate
+D29 picture E18 perform the rotation and position detection from
+`taking_picture_cycle.ino`. The cutting E18 from `cutting_cycle.ino` uses D45
+in v2 because `ir_3` uses D43. All pin changes are in the v2 sketch; the
+source cycle sketches are unchanged. All IR inputs
 assume LOW means triggered; confirm this with your actual sensor outputs.
 
 1. With the LED on, press the button. A 350 ms start cue keeps the LED on;
@@ -109,26 +108,31 @@ assume LOW means triggered; confirm this with your actual sensor outputs.
    Press the button once to run one picture cycle. While that cycle runs, the
    LED blinks every `PHOTO_LED_BLINK_MS` (300 ms by default).
 3. Each picture cycle turns `motor_4` until `picture_cycle_e18` goes clear
-   and then triggers. It stops the rotator, moves the position servo to 0
-   degrees for 700 ms, then returns it to 30 degrees.
+   and then triggers. It stops the rotator, waits 500 ms, moves the position
+   servo to 40 degrees for 700 ms, then returns it to 90 degrees.
 4. After the first photo, `roll_1` and `roll_2` run to `ir_2`. After the second,
    `roll_2` and `roll_3` run to `ir_3`.
 5. After the third photo, the controller waits for the separate cutter IR on
-   D43 (`CUT_WAIT_FOR_SENSOR = true`). It runs the cutting servo forward for
+   D45 (`CUT_WAIT_FOR_SENSOR = true`). It runs the cutting servo forward for
    1800 ms, neutral for 250 ms,
-   reverse for 1700 ms, then neutral. Each completed cut adds 50 ms to the
-   next forward and reverse durations. Then `roll_2` and `roll_3` run to `ir_4`.
+   reverse for 1700 ms, then neutral. Each completed cut adds 25 ms to the
+   next forward duration and 100 ms to the next reverse duration. Then
+   `roll_2` and `roll_3` run to `ir_4`.
 6. After the fourth photo, `roll_2` and `roll_3` run for `FINAL_RUN_MS`
    (10,000 ms). The LED blinks at `FINAL_LED_BLINK_MS` (1,000 ms by default)
    during this final run. All motors stop afterward, the LED turns on, and the
    button can start another full run.
 
 `STOP` cancels any phase, brakes all four DC motors, neutralizes the cutting
-servo, and restores the position servo to 30 degrees. `D` also disables
+servo, and restores the position servo to 90 degrees. `D` also disables
 button start until `E` is sent. `AUTO` starts the full run from Serial as an
 alternative to the button. `STATUS` and `SENSORS` report progress and inputs.
 The sensor-driven roll, picture rotation, and cutter wait phases each have a
 60-second timeout by default. Set the corresponding timeout constant to 0 to
 disable it. Use suitable external supplies and a common ground.
 Set `CUT_WAIT_FOR_SENSOR` to `false` to run the cut immediately after the
-third picture instead of waiting for D43.
+third picture instead of waiting for D45.
+The picture and cutting E18 inputs use `INPUT`, matching their standalone
+sketches; each output must provide a defined HIGH level when clear. V2 embeds
+the two cycle mechanisms, so changes to either standalone sketch must also
+be copied into V2.
