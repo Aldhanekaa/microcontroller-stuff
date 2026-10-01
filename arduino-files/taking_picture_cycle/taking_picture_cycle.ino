@@ -6,8 +6,8 @@ const int e18_sensor = 29;
 const uint8_t SERVO_PIN = 21;
 const int MIN_ANGLE = 0;
 const int MAX_ANGLE = 180;
-const int INITIAL_SERVO_ANGLE = 30;
-const int TRIGGER_SERVO_ANGLE = 0;
+const int INITIAL_SERVO_ANGLE = 90;
+const int TRIGGER_SERVO_ANGLE = 40;
 const unsigned long SERVO_HOLD_MS = 700;
 const size_t COMMAND_LENGTH = 32;
 
