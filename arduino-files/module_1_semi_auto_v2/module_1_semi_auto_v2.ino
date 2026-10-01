@@ -73,7 +73,7 @@ const unsigned long ROLL_SENSOR_DEBOUNCE_MS = 30UL;
 const unsigned long ROLL_SENSOR_TIMEOUT_MS = 60000UL;
 const unsigned long ROTATION_SENSOR_TIMEOUT_MS = 60000UL;
 const unsigned long CUT_SENSOR_TIMEOUT_MS = 60000UL;  // Unused; cutter starts immediately.
-const unsigned long PICTURE_SERVO_HOLD_MS = 700UL;
+const unsigned long PICTURE_SERVO_HOLD_MS = 1000UL;
 const unsigned long PHOTO_LED_BLINK_MS = 300UL;
 const unsigned long FINAL_RUN_MS = 10000UL;
 const unsigned long FINAL_LED_BLINK_MS = 1000UL;
@@ -325,12 +325,16 @@ void finishPictureCycle() {
   positionServo.write(POSITION_INITIAL_ANGLE);
   Serial.println(F("Picture cycle complete."));
   if (stationIndex == 2) {
+    delay(800);
+
     cuttingServo.writeMicroseconds(CUT_STOP_US);
     runState = CUT_WAIT_SENSOR;
     stateStartedMs = millis();
     setButtonLed(false);
     Serial.println(F("Starting cutter cycle without waiting for sensor."));
   } else if (stationIndex == 3) {
+    delay(800);
+
     stopAllMotors();
     setMotor(1, ROLL_2_SECOND_PAIR_DOWN);
     setMotor(2, ROLL_3_DOWN);
@@ -340,6 +344,8 @@ void finishPictureCycle() {
     ledLastToggleMs = stateStartedMs;
     Serial.println(F("Final roll_2 and roll_3 run: 10000 ms."));
   } else {
+    delay(1000);
+
     ++stationIndex;
     startRollToStation();
   }
