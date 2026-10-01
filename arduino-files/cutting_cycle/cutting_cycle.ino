@@ -8,7 +8,9 @@ const int FORWARD_US = 1600;
 const int REVERSE_US = 1400;
 const unsigned long INITIAL_FORWARD_MS = 1800;
 const unsigned long INITIAL_REVERSE_MS = 1700;
-const unsigned long DURATION_INCREMENT_MS = 50;
+const unsigned long FORWARD_DURATION_INCREMENT_MS = 25;
+const unsigned long BACKWARD_DURATION_INCREMENT_MS = 100;
+
 const unsigned long HOLD_BEFORE_REVERSE_MS = 250;
 
 Servo cuttingServo;
@@ -57,8 +59,8 @@ void updateCycle() {
 	} else if (cycleStage == MOVING_REVERSE && elapsedMs >= reverseDurationMs) {
 		stopServo();
 		cycleStage = IDLE;
-		forwardDurationMs += DURATION_INCREMENT_MS;
-		reverseDurationMs += DURATION_INCREMENT_MS;
+		forwardDurationMs += FORWARD_DURATION_INCREMENT_MS;
+		reverseDurationMs += BACKWARD_DURATION_INCREMENT_MS;
 		Serial.println(F("Cycle complete; waiting for sensor to clear"));
 	}
 }
