@@ -5,17 +5,17 @@
   button. All motion is a nonblocking state machine so serial STOP is checked
   throughout sensor waits, servo holds, cutter motion, and the final 10 s run.
 
-  L298N board 1 (ENA/ENB jumpers ON): roll_1 IN1/IN2 = D13/D15,
-    roll_2 IN3/IN4 = D9/D11.
-  L298N board 2 (ENA/ENB jumpers ON): roll_3 IN1/IN2 = D19/D17,
-    motor_4 (picture rotator) IN3/IN4 = D5/D7.
-  IR sensors: ir_1 = D27, ir_2 = D23, ir_3 = D43, ir_4 = D25,
-    picture-cycle E18 = D29, cutting-cycle E18 = D45.
+  L298N board 1 (ENA/ENB jumpers ON): roll_1 IN1/IN2 = D7/D8,
+    roll_2 IN3/IN4 = D9/D10.
+  L298N board 2 (ENA/ENB jumpers ON): roll_3 IN1/IN2 = D24/D25,
+    motor_4 (picture rotator) IN3/IN4 = D26/D27.
+  IR sensors: ir_1..ir_4 = D30..D33, legacy ir_rotation_trigger = D34,
+    picture-cycle E18 = D29, cutting-cycle E18 = D43.
   The picture and cutting E18 sensors are separate inputs. Sensor outputs
   are assumed active LOW.
   Button = D41 to GND (INPUT_PULLUP); ButtonLED = D39 (HIGH = ON).
-  Position servo = D40; continuous cutting servo = D31. The cutting E18
-  moved from its source D43 to D45 because v2 uses D43 for ir_3.
+  Position servo = D40; continuous cutting servo = D42. D42 replaces the
+  old D41 servo signal because button.ino uses D41 for the button.
 
   Use suitable external motor/servo supplies and a common Mega ground.
   Serial Monitor: 115200 baud, Newline or Both NL & CR.
@@ -36,12 +36,12 @@ struct SensorPin { const char *name; uint8_t pin; };
 enum MotorDirection { MOTOR_OFF, MOTOR_FORWARD, MOTOR_REVERSE };
 enum RunState {
   READY, START_LED_CUE, ROLL_TO_SENSOR, WAIT_PHOTO_BUTTON,
-  PHOTO_WAIT_CLEAR, PHOTO_ROTATING, PHOTO_PRE_SERVO_DELAY, PHOTO_SERVO_HOLD,
+  PHOTO_WAIT_CLEAR, PHOTO_ROTATING, PHOTO_SERVO_HOLD,
   CUT_WAIT_SENSOR, CUT_FORWARD, CUT_HOLD, CUT_REVERSE, FINAL_RUN,
   DISABLED
 };
 
-// Physical v2 wiring. motor_4 is the picture rotator.
+// Pin assignments retain the v1 roll wiring. motor_4 is the picture rotator.
 const MotorPins MOTORS[4] = {
   {"roll_1", 13, 15}, {"roll_2", 9, 11},
   {"roll_3", 19, 17}, {"motor_4", 5, 7}
@@ -49,11 +49,12 @@ const MotorPins MOTORS[4] = {
 const SensorPin ROLL_SENSORS[4] = {
   {"ir_1", 27}, {"ir_2", 23}, {"ir_3", 43}, {"ir_4", 25}
 };
+// const uint8_t IR_ROTATION_TRIGGER_PIN = 34;  // Original v1 sensor; status only.
 const uint8_t PICTURE_CYCLE_E18_PIN = 29;    // taking_picture_cycle e18_sensor.
-const uint8_t CUTTING_CYCLE_E18_PIN = 45;    // Source D43 conflicts with v2 ir_3.
+const uint8_t CUTTING_CYCLE_E18_PIN = 43;    // cutting_cycle E18_SENSOR_PIN.
 const uint8_t BUTTON_PIN = 41;
 const uint8_t BUTTON_LED_PIN = 39;
-const uint8_t POSITION_SERVO_PIN = 40;
+const uint8_t POSITION_SERVO_PIN = 21;
 const uint8_t CUTTING_SERVO_PIN = 31;
 const uint8_t SENSOR_ACTIVE_LEVEL = LOW;
 
@@ -71,24 +72,21 @@ const unsigned long START_LED_CUE_MS = 350UL;
 const unsigned long ROLL_SENSOR_DEBOUNCE_MS = 30UL;
 const unsigned long ROLL_SENSOR_TIMEOUT_MS = 60000UL;
 const unsigned long ROTATION_SENSOR_TIMEOUT_MS = 60000UL;
-const unsigned long CUT_SENSOR_TIMEOUT_MS = 60000UL;
-const bool CUT_WAIT_FOR_SENSOR = true;  // false starts the cut immediately.
-const unsigned long PICTURE_PRE_SERVO_DELAY_MS = 500UL;
-const unsigned long PICTURE_SERVO_HOLD_MS = 700UL;
+const unsigned long CUT_SENSOR_TIMEOUT_MS = 60000UL;  // Unused; cutter starts immediately.
+const unsigned long PICTURE_SERVO_HOLD_MS = 1000UL;
 const unsigned long PHOTO_LED_BLINK_MS = 300UL;
 const unsigned long FINAL_RUN_MS = 10000UL;
 const unsigned long FINAL_LED_BLINK_MS = 1000UL;
 
 // Values from taking_picture_cycle.ino and cutting_cycle.ino.
 const int POSITION_INITIAL_ANGLE = 90;
-const int POSITION_TRIGGER_ANGLE = 40;
+const int POSITION_TRIGGER_ANGLE = 30;
 const int CUT_STOP_US = 1500;
 const int CUT_FORWARD_US = 1600;
 const int CUT_REVERSE_US = 1400;
 const unsigned long CUT_INITIAL_FORWARD_MS = 1800UL;
 const unsigned long CUT_INITIAL_REVERSE_MS = 1700UL;
-const unsigned long CUT_FORWARD_INCREMENT_MS = 25UL;
-const unsigned long CUT_REVERSE_INCREMENT_MS = 100UL;
+const unsigned long CUT_DURATION_INCREMENT_MS = 50UL;
 const unsigned long CUT_HOLD_MS = 250UL;
 const int MANUAL_SERVO_MIN_US = 1200;
 const int MANUAL_SERVO_MAX_US = 1800;
@@ -103,7 +101,6 @@ unsigned long sensorLowStartedMs = 0;
 bool sensorLowTiming = false;
 unsigned long cutForwardDurationMs = CUT_INITIAL_FORWARD_MS;
 unsigned long cutReverseDurationMs = CUT_INITIAL_REVERSE_MS;
-bool cuttingSensorWasClear = true;
 
 bool buttonLastRaw = HIGH;
 bool buttonStable = HIGH;
@@ -124,7 +121,6 @@ const char *stateName(RunState state) {
     case WAIT_PHOTO_BUTTON: return "waiting for picture button press";
     case PHOTO_WAIT_CLEAR: return "picture rotator waiting for sensor clear";
     case PHOTO_ROTATING: return "picture rotator moving";
-    case PHOTO_PRE_SERVO_DELAY: return "picture servo pre-trigger pause";
     case PHOTO_SERVO_HOLD: return "picture servo holding trigger angle";
     case CUT_WAIT_SENSOR: return "waiting for cutting sensor";
     case CUT_FORWARD: return "cutter forward";
@@ -164,7 +160,6 @@ bool isActive(uint8_t pin) {
 // isPictureState: Identify states that use the normal LED blink interval.
 bool isPictureState() {
   return runState == PHOTO_WAIT_CLEAR || runState == PHOTO_ROTATING ||
-         runState == PHOTO_PRE_SERVO_DELAY ||
          runState == PHOTO_SERVO_HOLD;
 }
 
@@ -308,8 +303,13 @@ void updateRollToStation() {
 // startPictureCycle: Port the picture sketch's reset-to-clear/trigger logic.
 // motor_4 turns in the source sketch's LOW/HIGH direction until D29 triggers.
 void startPictureCycle() {
+  stopAllMotors();
   positionServo.write(POSITION_INITIAL_ANGLE);
-  setMotor(3, ROTATOR_DIRECTION);
+
+  digitalWrite(9, LOW );
+  digitalWrite(11, HIGH);
+
+
   runState = isActive(PICTURE_CYCLE_E18_PIN) ? PHOTO_WAIT_CLEAR : PHOTO_ROTATING;
   stateStartedMs = millis();
   sensorLowTiming = false;
@@ -329,7 +329,7 @@ void finishPictureCycle() {
     runState = CUT_WAIT_SENSOR;
     stateStartedMs = millis();
     setButtonLed(false);
-    Serial.println(F("Waiting for cutting sensor before cutter cycle."));
+    Serial.println(F("Starting cutter cycle without waiting for sensor."));
   } else if (stationIndex == 3) {
     stopAllMotors();
     setMotor(1, ROLL_2_SECOND_PAIR_DOWN);
@@ -345,30 +345,37 @@ void finishPictureCycle() {
   }
 }
 
-// updatePictureCycle: Wait for a blocked sensor to clear, then for its next
-// LOW trigger. Stop motor_4, pause 500 ms, hold the servo at 40 degrees for
-// 700 ms, then restore 90 degrees. The rotation timeout covers sensor waits.
+// updatePictureCycle: Wait for an existing blocked position sensor to clear,
+// then detect its next LOW trigger, stop motor_4, hold servo at 0 deg for
+// 700 ms, and restore 30 deg. The timeout also covers waiting for clear.
 void updatePictureCycle() {
   unsigned long now = millis();
   if (runState == PHOTO_WAIT_CLEAR && !isActive(PICTURE_CYCLE_E18_PIN)) {
     runState = PHOTO_ROTATING;
     Serial.println(F("Rotation sensor cleared; awaiting next trigger."));
-  } else if (runState == PHOTO_ROTATING && isActive(PICTURE_CYCLE_E18_PIN)) {
-    setMotor(3, MOTOR_OFF);
-    runState = PHOTO_PRE_SERVO_DELAY;
-    stateStartedMs = now;
-    Serial.println(F("Rotation trigger reached; pausing before servo."));
+  } else if (runState == PHOTO_ROTATING) {
+    if (isActive(PICTURE_CYCLE_E18_PIN)) {
+      if (!sensorLowTiming) {
+        sensorLowTiming = true;
+        sensorLowStartedMs = now;
+      } else if (now - sensorLowStartedMs >= ROLL_SENSOR_DEBOUNCE_MS) {
+        digitalWrite(9, LOW );
+        digitalWrite(11, LOW);
+        delay(500);
+        Serial.println(F("Rotation sensor triggered; stopping rotator."));
+        positionServo.write(POSITION_TRIGGER_ANGLE);
+        
+        runState = PHOTO_SERVO_HOLD;
+        stateStartedMs = now;
+        Serial.println(F("Rotation trigger reached; holding picture servo."));
+      }
+    } else {
+      sensorLowTiming = false;
+    }
   }
-  if (runState == PHOTO_PRE_SERVO_DELAY &&
-      now - stateStartedMs >= PICTURE_PRE_SERVO_DELAY_MS) {
-    positionServo.write(POSITION_TRIGGER_ANGLE);
-    runState = PHOTO_SERVO_HOLD;
-    stateStartedMs = now;
-    Serial.println(F("Holding picture servo at trigger angle."));
-  } else if (runState == PHOTO_SERVO_HOLD) {
+  if (runState == PHOTO_SERVO_HOLD) {
     if (now - stateStartedMs >= PICTURE_SERVO_HOLD_MS) finishPictureCycle();
-  } else if ((runState == PHOTO_WAIT_CLEAR || runState == PHOTO_ROTATING) &&
-             ROTATION_SENSOR_TIMEOUT_MS > 0 &&
+  } else if (ROTATION_SENSOR_TIMEOUT_MS > 0 &&
              now - stateStartedMs >= ROTATION_SENSOR_TIMEOUT_MS) {
     Serial.println(F("Picture rotation sensor timeout."));
     stopSystem(false);
@@ -376,7 +383,7 @@ void updatePictureCycle() {
 }
 
 // startCuttingMotion: Port the source cutter's forward/hold/reverse cycle.
-// Durations start at 1800/1700 ms; each cut adds 25/100 ms respectively.
+// Durations start at 1800/1700 ms and increase 50 ms after each completed cut.
 void startCuttingMotion() {
   cuttingServo.writeMicroseconds(CUT_FORWARD_US);
   runState = CUT_FORWARD;
@@ -388,26 +395,13 @@ void startCuttingMotion() {
   Serial.println(F(" ms."));
 }
 
-// updateCuttingCycle: Wait for a fresh active-LOW cutter sensor event, then
-// execute forward, neutral hold, reverse, neutral without blocking STOP.
+// updateCuttingCycle: Start immediately, then execute forward, neutral hold,
+// reverse, and neutral without blocking STOP.
 void updateCuttingCycle() {
   unsigned long now = millis();
   if (runState == CUT_WAIT_SENSOR) {
-    if (!CUT_WAIT_FOR_SENSOR) {
-      startCuttingMotion();
-      return;
-    }
-    if (!isActive(CUTTING_CYCLE_E18_PIN)) {
-      cuttingSensorWasClear = true;
-    } else if (cuttingSensorWasClear) {
-      cuttingSensorWasClear = false;
-      startCuttingMotion();
-      return;
-    }
-    if (CUT_SENSOR_TIMEOUT_MS > 0 && now - stateStartedMs >= CUT_SENSOR_TIMEOUT_MS) {
-      Serial.println(F("Cutting sensor timeout."));
-      stopSystem(false);
-    }
+    startCuttingMotion();
+    return;
   } else if (runState == CUT_FORWARD &&
              now - stateStartedMs >= cutForwardDurationMs) {
     cuttingServo.writeMicroseconds(CUT_STOP_US);
@@ -421,8 +415,8 @@ void updateCuttingCycle() {
   } else if (runState == CUT_REVERSE &&
              now - stateStartedMs >= cutReverseDurationMs) {
     cuttingServo.writeMicroseconds(CUT_STOP_US);
-    cutForwardDurationMs += CUT_FORWARD_INCREMENT_MS;
-    cutReverseDurationMs += CUT_REVERSE_INCREMENT_MS;
+    cutForwardDurationMs += CUT_DURATION_INCREMENT_MS;
+    cutReverseDurationMs += CUT_DURATION_INCREMENT_MS;
     Serial.println(F("Cutting cycle complete; moving to ir_4."));
     stationIndex = 3;
     startRollToStation();
@@ -440,13 +434,15 @@ void updateFinalRun() {
   }
 }
 
-// printSensors: Show four roll IRs and the two separate cycle E18 sensors.
+// printSensors: Show four roll IRs, the original v1 IR, and both cycle E18s.
 void printSensors() {
   for (uint8_t i = 0; i < 4; ++i) {
     Serial.print(ROLL_SENSORS[i].name);
     Serial.print(F(": "));
     Serial.println(isActive(ROLL_SENSORS[i].pin) ? F("TRIGGERED") : F("clear"));
   }
+  Serial.print(F("ir_rotation_trigger: "));
+  // Serial.println(isActive(IR_ROTATION_TRIGGER_PIN) ? F("TRIGGERED") : F("clear"));
   Serial.print(F("picture_cycle_e18: "));
   Serial.println(isActive(PICTURE_CYCLE_E18_PIN) ? F("TRIGGERED") : F("clear"));
   Serial.print(F("cutting_cycle_e18: "));
@@ -606,7 +602,6 @@ void updateState() {
     case ROLL_TO_SENSOR: updateRollToStation(); break;
     case PHOTO_WAIT_CLEAR:
     case PHOTO_ROTATING:
-    case PHOTO_PRE_SERVO_DELAY:
     case PHOTO_SERVO_HOLD: updatePictureCycle(); break;
     case CUT_WAIT_SENSOR:
     case CUT_FORWARD:
@@ -625,8 +620,9 @@ void setup() {
     pinMode(MOTORS[i].in1, OUTPUT);
     pinMode(MOTORS[i].in2, OUTPUT);
     setMotor(i, MOTOR_OFF);
-    pinMode(ROLL_SENSORS[i].pin, INPUT_PULLUP);
+    pinMode(ROLL_SENSORS[i].pin, INPUT);
   }
+  // pinMode(IR_ROTATION_TRIGGER_PIN, INPUT_PULLUP);
   pinMode(PICTURE_CYCLE_E18_PIN, INPUT);
   pinMode(CUTTING_CYCLE_E18_PIN, INPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -634,8 +630,9 @@ void setup() {
   buttonLastRaw = digitalRead(BUTTON_PIN);
   buttonStable = buttonLastRaw;
   positionServo.attach(POSITION_SERVO_PIN);
-  cuttingServo.attach(CUTTING_SERVO_PIN);
   positionServo.write(POSITION_INITIAL_ANGLE);
+
+  cuttingServo.attach(CUTTING_SERVO_PIN);
   cuttingServo.writeMicroseconds(CUT_STOP_US);
   setButtonLed(true);
   Serial.println(F("Module 1 v2 ready. Press button to start."));
@@ -643,12 +640,11 @@ void setup() {
 }
 
 // loop: Prioritize serial STOP, process a debounced button press, advance
-// motion, and update the ButtonLED. The cutter sensor rearms when clear.
+// motion, and update the ButtonLED.
 void loop() {
   stopCommandThisLoop = false;
   pollSerial();
   bool pressed = buttonPressed();
-  if (!isActive(CUTTING_CYCLE_E18_PIN)) cuttingSensorWasClear = true;
   if (!stopCommandThisLoop && pressed) {
     if (runState == READY) startFullAutomation();
     else if (runState == WAIT_PHOTO_BUTTON) startPictureCycle();
