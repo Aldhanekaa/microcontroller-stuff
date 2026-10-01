@@ -202,6 +202,7 @@ void updateAutomation(int currentSensorState) {
   } else if (automationState == AUTOMATION_ROTATING) {
     if (currentSensorState == LOW) {
       stopRotator();
+      delay(500);
       moveToAngle(TRIGGER_SERVO_ANGLE);
       servoHoldStartTime = millis();
       automationState = AUTOMATION_HOLDING_SERVO;
