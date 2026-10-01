@@ -41,18 +41,18 @@ enum RunState {
 
 // Pin assignments retain the v1 roll wiring. motor_4 is the picture rotator.
 const MotorPins MOTORS[4] = {
-  {"roll_1", 7, 8}, {"roll_2", 9, 10},
-  {"roll_3", 24, 25}, {"motor_4", 26, 27}
+  {"roll_1", 13, 15}, {"roll_2", 9, 11},
+  {"roll_3", 19, 17}, {"motor_4", 5, 7}
 };
 const SensorPin ROLL_SENSORS[4] = {
-  {"ir_1", 30}, {"ir_2", 31}, {"ir_3", 32}, {"ir_4", 33}
+  {"ir_1", 27}, {"ir_2", 23}, {"ir_3", 43}, {"ir_4", 25}
 };
 const uint8_t ROTATION_SENSOR_PIN = 34;
 const uint8_t CUT_SENSOR_PIN = 43;
 const uint8_t BUTTON_PIN = 41;
 const uint8_t BUTTON_LED_PIN = 39;
 const uint8_t POSITION_SERVO_PIN = 40;
-const uint8_t CUTTING_SERVO_PIN = 42;
+const uint8_t CUTTING_SERVO_PIN = 31;
 const uint8_t SENSOR_ACTIVE_LEVEL = LOW;
 
 // Change these directions if physical wiring makes a motor turn the wrong way.
