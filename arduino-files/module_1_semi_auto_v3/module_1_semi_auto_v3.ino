@@ -11,13 +11,14 @@
   IR sensors: ir_1..ir_4 = D27/D23/D43/D25, picture E18 = D29,
     cutting E18 = D45 (reported only). Sensor outputs are active LOW.
   Button = D41 to GND (INPUT_PULLUP); ButtonLED = D39 (HIGH = ON).
-  Position servo = D21; continuous cutting servo = D31.
+  Picture position servo = D21; cutting position servo = D31.
 
   Use suitable external motor/servo supplies and a common Mega ground.
   Serial Monitor: 115200 baud, Newline or Both NL & CR.
   Commands: STOP, E, D, AUTO, STATUS, SENSORS, HELP,
     MOTOR-1-ON/OFF through MOTOR-4-ON/OFF, ALL-ON, ALL-OFF,
-    SERVO-1-1500, SERVO-2-1500 (manual pulse widths in microseconds).
+    SERVO-1-1500 (picture servo pulse in microseconds),
+    SERVO-2-90 (cutting servo angle in degrees).
   The button starts a full run and starts the servo countdown at each photo.
 */
 
@@ -34,7 +35,7 @@ enum RunState {
   READY, START_LED_CUE, ROLL_TO_SENSOR, ROLL_TO_ROTATION_DELAY,
   PHOTO_WAIT_CLEAR, PHOTO_ROTATING, WAIT_PHOTO_BUTTON,
   PHOTO_COUNTDOWN, PHOTO_SERVO_HOLD, POST_PHOTO_PAUSE,
-  CUT_WAIT_SENSOR, CUT_FORWARD, CUT_HOLD, CUT_REVERSE, FINAL_RUN,
+  CUT_TO_ANGLE, CUT_HOLD, CUT_RETURN, FINAL_RUN,
   DISABLED
 };
 
@@ -78,18 +79,18 @@ const unsigned long POST_PHOTO_PAUSE_AFTER_IR_3_OR_4_MS = 800UL;
 const unsigned long FINAL_RUN_MS = 10000UL;
 const unsigned long FINAL_LED_BLINK_MS = 1000UL;
 
-// Values from taking_picture_cycle.ino and cutting_cycle.ino.
+// Picture angles from v3 and cutter home angle from servo_rot_control.ino.
 const int POSITION_INITIAL_ANGLE = 90;
 const int POSITION_TRIGGER_ANGLE = 40;
-const int CUT_STOP_US = 1500;
-const int CUT_FORWARD_US = 1600;
-const int CUT_REVERSE_US = 1400;
-const unsigned long CUT_INITIAL_FORWARD_MS = 1800UL;
-const unsigned long CUT_INITIAL_REVERSE_MS = 1700UL;
-const unsigned long CUT_DURATION_INCREMENT_MS = 50UL;
+const int CUT_HOME_ANGLE = 40;
+const int CUT_ACTION_ANGLE = 90;  // Set for the installed cutting linkage.
+const unsigned long CUT_TO_ANGLE_MS = 1800UL;
+const unsigned long CUT_RETURN_MS = 1700UL;
 const unsigned long CUT_HOLD_MS = 250UL;
 const int MANUAL_SERVO_MIN_US = 1200;
 const int MANUAL_SERVO_MAX_US = 1800;
+const int MANUAL_CUT_MIN_ANGLE = 0;
+const int MANUAL_CUT_MAX_ANGLE = 180;
 
 Servo positionServo;
 Servo cuttingServo;
@@ -99,8 +100,6 @@ uint8_t stationIndex = 0;  // 0..3 selects ir_1..ir_4.
 unsigned long stateStartedMs = 0;
 unsigned long sensorLowStartedMs = 0;
 bool sensorLowTiming = false;
-unsigned long cutForwardDurationMs = CUT_INITIAL_FORWARD_MS;
-unsigned long cutReverseDurationMs = CUT_INITIAL_REVERSE_MS;
 uint8_t lastCountdownSecond = PHOTO_COUNTDOWN_SECONDS;
 
 bool buttonLastRaw = HIGH;
@@ -126,10 +125,9 @@ const char *stateName(RunState state) {
     case PHOTO_COUNTDOWN: return "picture countdown";
     case PHOTO_SERVO_HOLD: return "picture servo holding trigger angle";
     case POST_PHOTO_PAUSE: return "pause after picture";
-    case CUT_WAIT_SENSOR: return "starting cutter cycle";
-    case CUT_FORWARD: return "cutter forward";
-    case CUT_HOLD: return "cutter hold";
-    case CUT_REVERSE: return "cutter reverse";
+    case CUT_TO_ANGLE: return "cutter moving to cut angle";
+    case CUT_HOLD: return "cutter holding cut angle";
+    case CUT_RETURN: return "cutter returning home";
     case FINAL_RUN: return "final 10 second roll";
     default: return "disabled";
   }
@@ -209,11 +207,11 @@ bool buttonPressed() {
   return pressed;
 }
 
-// stopSystem: Cancel the run, brake every DC motor, neutralize the cutter,
-// restore the position servo, and return to READY or DISABLED.
+// stopSystem: Cancel the run, stop DC motors, return both servos home,
+// and return to READY or DISABLED.
 void stopSystem(bool disable) {
   stopAllMotors();
-  cuttingServo.writeMicroseconds(CUT_STOP_US);
+  cuttingServo.write(CUT_HOME_ANGLE);
   positionServo.write(POSITION_INITIAL_ANGLE);
   sensorLowTiming = false;
   runState = disable ? DISABLED : READY;
@@ -260,7 +258,7 @@ void startFullAutomation() {
     return;
   }
   stopAllMotors();
-  cuttingServo.writeMicroseconds(CUT_STOP_US);
+  cuttingServo.write(CUT_HOME_ANGLE);
   positionServo.write(POSITION_INITIAL_ANGLE);
   for (uint8_t i = 0; i < 4; ++i) {
     if (isActive(ROLL_SENSORS[i].pin)) {
@@ -383,11 +381,13 @@ void finishPictureCycle() {
 // advanceAfterPhotoPause: After station 3, cut before rolling to station 4.
 void advanceAfterPhotoPause() {
   if (stationIndex == 2) {
-    cuttingServo.writeMicroseconds(CUT_STOP_US);
-    runState = CUT_WAIT_SENSOR;
+    cuttingServo.write(CUT_ACTION_ANGLE);
+    runState = CUT_TO_ANGLE;
     stateStartedMs = millis();
     setButtonLed(false);
-    Serial.println(F("Starting cutter cycle without waiting for sensor."));
+    Serial.print(F("Cutting servo moving to "));
+    Serial.print(CUT_ACTION_ANGLE);
+    Serial.println(F(" degrees."));
   } else if (stationIndex == 3) {
     stopAllMotors();
     setMotor(1, ROLL_2_SECOND_PAIR_DOWN);
@@ -429,41 +429,22 @@ void updatePictureCycle() {
   }
 }
 
-// startCuttingMotion: Port the source cutter's forward/hold/reverse cycle.
-// Durations start at 1800/1700 ms and increase 50 ms after each completed cut.
-void startCuttingMotion() {
-  cuttingServo.writeMicroseconds(CUT_FORWARD_US);
-  runState = CUT_FORWARD;
-  stateStartedMs = millis();
-  Serial.print(F("Cutter forward "));
-  Serial.print(cutForwardDurationMs);
-  Serial.print(F(" ms, reverse "));
-  Serial.print(cutReverseDurationMs);
-  Serial.println(F(" ms."));
-}
-
-// updateCuttingCycle: Start immediately, then execute forward, neutral hold,
-// reverse, and neutral without blocking STOP.
+// updateCuttingCycle: Allow travel to the cut angle, hold it, then return
+// to the home angle. These waits stay nonblocking so STOP remains responsive.
 void updateCuttingCycle() {
   unsigned long now = millis();
-  if (runState == CUT_WAIT_SENSOR) {
-    startCuttingMotion();
-    return;
-  } else if (runState == CUT_FORWARD &&
-             now - stateStartedMs >= cutForwardDurationMs) {
-    cuttingServo.writeMicroseconds(CUT_STOP_US);
+  if (runState == CUT_TO_ANGLE &&
+      now - stateStartedMs >= CUT_TO_ANGLE_MS) {
     runState = CUT_HOLD;
     stateStartedMs = now;
-    Serial.println(F("Cutter holding before reverse."));
+    Serial.println(F("Cutter holding at cut angle."));
   } else if (runState == CUT_HOLD && now - stateStartedMs >= CUT_HOLD_MS) {
-    cuttingServo.writeMicroseconds(CUT_REVERSE_US);
-    runState = CUT_REVERSE;
+    cuttingServo.write(CUT_HOME_ANGLE);
+    runState = CUT_RETURN;
     stateStartedMs = now;
-  } else if (runState == CUT_REVERSE &&
-             now - stateStartedMs >= cutReverseDurationMs) {
-    cuttingServo.writeMicroseconds(CUT_STOP_US);
-    cutForwardDurationMs += CUT_DURATION_INCREMENT_MS;
-    cutReverseDurationMs += CUT_DURATION_INCREMENT_MS;
+    Serial.println(F("Cutter returning home."));
+  } else if (runState == CUT_RETURN &&
+             now - stateStartedMs >= CUT_RETURN_MS) {
     Serial.println(F("Cutting cycle complete; moving to ir_4."));
     stationIndex = 3;
     startRollToStation();
@@ -496,7 +477,7 @@ void printSensors() {
   Serial.println(buttonStable == LOW ? F("PRESSED") : F("released"));
 }
 
-// printStatus: Show phase, target station, motor outputs, cutter timing, and IRs.
+// printStatus: Show phase, target station, motor outputs, cutter angles, and IRs.
 void printStatus() {
   Serial.print(F("State: "));
   Serial.println(stateName(runState));
@@ -510,10 +491,10 @@ void printStatus() {
   }
   Serial.print(F("ButtonLED: "));
   Serial.println(ledOn ? F("ON") : F("OFF"));
-  Serial.print(F("Next cutter durations, forward/reverse ms: "));
-  Serial.print(cutForwardDurationMs);
+  Serial.print(F("Cutter home/cut angles: "));
+  Serial.print(CUT_HOME_ANGLE);
   Serial.print('/');
-  Serial.println(cutReverseDurationMs);
+  Serial.println(CUT_ACTION_ANGLE);
   printSensors();
 }
 
@@ -522,7 +503,7 @@ void printHelp() {
   Serial.println(F("Button: start run; after each automatic rotation, press for a 5 s photo countdown."));
   Serial.println(F("STOP | E | D | AUTO | AUTOMATE-FULL | STATUS | SENSORS | HELP"));
   Serial.println(F("MOTOR-1-ON/OFF .. MOTOR-4-ON/OFF | ALL-ON | ALL-OFF"));
-  Serial.println(F("SERVO-1-1500 | SERVO-2-1500 (manual pulses 1200..1800 us)"));
+  Serial.println(F("SERVO-1-1500 (1200..1800 us) | SERVO-2-90 (0..180 degrees)"));
 }
 
 // processCommand: Keep v1 serial controls; STOP and D work in every state.
@@ -593,18 +574,27 @@ void processCommand(char *command) {
   if (strncmp(command, "SERVO-", 6) == 0 &&
       (command[6] == '1' || command[6] == '2') && command[7] == '-') {
     char *end = NULL;
-    long pulseUs = strtol(command + 8, &end, 10);
-    if (end != command + 8 && *end == '\0' &&
-        pulseUs >= MANUAL_SERVO_MIN_US && pulseUs <= MANUAL_SERVO_MAX_US) {
-      if (command[6] == '1') positionServo.writeMicroseconds((int)pulseUs);
-      else cuttingServo.writeMicroseconds((int)pulseUs);
-      Serial.print(F("Servo "));
-      Serial.print(command[6]);
-      Serial.print(F(" pulse: "));
-      Serial.println(pulseUs);
-      return;
+    long value = strtol(command + 8, &end, 10);
+    if (end != command + 8 && *end == '\0') {
+      if (command[6] == '1' && value >= MANUAL_SERVO_MIN_US &&
+          value <= MANUAL_SERVO_MAX_US) {
+        positionServo.writeMicroseconds((int)value);
+        Serial.print(F("Picture servo pulse: "));
+        Serial.println(value);
+        return;
+      }
+      if (command[6] == '2' && value >= MANUAL_CUT_MIN_ANGLE &&
+          value <= MANUAL_CUT_MAX_ANGLE) {
+        cuttingServo.write((int)value);
+        Serial.print(F("Cutting servo angle: "));
+        Serial.println(value);
+        return;
+      }
     }
-    Serial.println(F("Invalid servo pulse. Use 1200..1800 us."));
+    if (command[6] == '1')
+      Serial.println(F("Invalid picture servo pulse. Use 1200..1800 us."));
+    else
+      Serial.println(F("Invalid cutting servo angle. Use 0..180 degrees."));
     return;
   }
   Serial.println(F("Unknown command. Send HELP."));
@@ -659,10 +649,9 @@ void updateState() {
                                POST_PHOTO_PAUSE_MS))
         advanceAfterPhotoPause();
       break;
-    case CUT_WAIT_SENSOR:
-    case CUT_FORWARD:
+    case CUT_TO_ANGLE:
     case CUT_HOLD:
-    case CUT_REVERSE: updateCuttingCycle(); break;
+    case CUT_RETURN: updateCuttingCycle(); break;
     case FINAL_RUN: updateFinalRun(); break;
     default: break;
   }
@@ -688,7 +677,7 @@ void setup() {
   positionServo.write(POSITION_INITIAL_ANGLE);
 
   cuttingServo.attach(CUTTING_SERVO_PIN);
-  cuttingServo.writeMicroseconds(CUT_STOP_US);
+  cuttingServo.write(CUT_HOME_ANGLE);
   setButtonLed(true);
   Serial.println(F("Module 1 v3 ready. Press button to start."));
   printHelp();

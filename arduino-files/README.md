@@ -149,10 +149,21 @@ avoid the D43 conflict with `ir_3`; the cut still starts immediately after the
 third picture.
 
 At each of the four roll IRs, v3 stops the roll motors after a 30 ms stable
-trigger, waits 800 ms, then turns `motor_4` until the picture E18 clears and
-triggers again. Rotation then stops and the LED stays on while waiting for a
+trigger, waits 800 ms, then runs the picture rotation routine until the picture
+E18 clears and triggers again. Rotation then stops and the LED stays on while waiting for a
 button press. That press starts a five-second serial countdown; the LED blinks
-every 300 ms throughout it. At the end, the position servo moves from 40 to
-0 degrees, holds for one second, and returns to 40 degrees. The existing
-cutting cycle after the third picture and final 10-second roll remain in place.
-The waits use `millis()`, so `STOP` can cancel the cycle at any point.
+every 300 ms throughout it. At the end, the picture servo moves from 90 to
+40 degrees, holds for one second, and returns to 90 degrees.
+
+After the third picture, the position-controlled cutting servo on D31 moves
+from its 40-degree home angle to `CUT_ACTION_ANGLE` (90 degrees by default),
+waits 1800 ms for travel, holds another 250 ms, then returns to 40 degrees
+and waits 1700 ms before the next roll. Adjust `CUT_ACTION_ANGLE` for the
+installed linkage. `SERVO-2-<angle>` accepts manual 0..180 degree commands
+while READY; `SERVO-1-<pulse>` still controls the picture servo in microseconds.
+The final 10-second roll remains in place. The new cutter travel and hold waits
+use `millis()`, so `STOP` can cancel the cutting cycle.
+
+The current v3 rotation routine directly writes D9/D11, while the motor table
+assigns those pins to `roll_2` and assigns D5/D7 to `motor_4`. Verify that
+wiring before uploading; this cutter change leaves the rotation routine intact.
