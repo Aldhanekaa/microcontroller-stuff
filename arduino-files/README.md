@@ -150,10 +150,10 @@ third picture.
 
 At each of the four roll IRs, v3 stops the roll motors after a 30 ms stable
 trigger, waits 800 ms, then runs the picture rotation routine until the picture
-E18 clears and triggers again. Rotation then stops and the LED stays on while waiting for a
-button press. That press starts a five-second serial countdown; the LED blinks
-every 300 ms throughout it. At the end, the picture servo moves from 90 to
-40 degrees, holds for one second, and returns to 90 degrees.
+E18 clears and triggers again. Rotation then stops and the LED stays on while
+waiting for a button press. That press starts a five-second serial countdown;
+the LED blinks every 300 ms throughout it. At the end, the picture servo moves
+from 90 to 40 degrees, holds for one second, and returns to 90 degrees.
 
 After the third picture, the position-controlled cutting servo on D31 moves
 from its 40-degree home angle to `CUT_ACTION_ANGLE` (90 degrees by default),
