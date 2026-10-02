@@ -79,8 +79,8 @@ const unsigned long FINAL_RUN_MS = 10000UL;
 const unsigned long FINAL_LED_BLINK_MS = 1000UL;
 
 // Values from taking_picture_cycle.ino and cutting_cycle.ino.
-const int POSITION_INITIAL_ANGLE = 90;
-const int POSITION_TRIGGER_ANGLE = 30;
+const int POSITION_INITIAL_ANGLE = 40;
+const int POSITION_TRIGGER_ANGLE = 0;
 const int CUT_STOP_US = 1500;
 const int CUT_FORWARD_US = 1600;
 const int CUT_REVERSE_US = 1400;
