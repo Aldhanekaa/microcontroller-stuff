@@ -11,6 +11,7 @@ time**, and open Serial Monitor at **115200 baud**. The pins target the Mega
 | `l298n_two_motors_no_pwm` | Motor A and B independently, then together, using full on/off drive with no PWM | `MOTOR_A`, `MOTOR_B`, `RUN_MS`, `REST_MS` |
 | `module_1_semi_auto` | Four regular DC motors on two L298Ns, five IR sensors, button status, two command-controlled servos, and a stoppable photo-position sequence | Motor/sensor pins, stage timeouts, 20-second and 2-second run constants |
 | `module_1_semi_auto_v2` | Button-led four-position photo sequence, picture rotator, cutter cycle after position 3, and a timed final roll | Pins, button/LED intervals, sensor timeouts, servo/cutter timing |
+| `module_1_semi_auto_v3` | Automatic picture rotation after each roll IR, then button-triggered five-second photo countdown | `ROLL_TO_ROTATION_DELAY_MS`, `PHOTO_COUNTDOWN_SECONDS`, LED blink and servo timing |
 | `g25_motor_encoder` | One G25 DC motor forward and reverse at three PWM levels, with A/B quadrature counts | Motor/encoder pins, `TEST_PWM`, `RUN_MS`, `SAMPLE_MS`, `ENCODER_EDGES_PER_OUTPUT_REV` |
 | `servo_25kg_position` | Move an **angle-controlled** servo through a limited sweep | `MIN_ANGLE`, `MAX_ANGLE`, `STEP_DEGREES`, timing |
 | `servo_25kg_continuous` | Run a **continuous-rotation** servo like a motor: forward, stop, reverse | `STOP_US`, `FORWARD_US`, `REVERSE_US`, timing |
@@ -136,3 +137,22 @@ The picture and cutting E18 inputs use `INPUT`, matching their standalone
 sketches; each output must provide a defined HIGH level when clear. V2 embeds
 the two cycle mechanisms, so changes to either standalone sketch must also
 be copied into V2.
+
+## Module 1 v3: automatic rotation and button photo countdown
+
+Upload `module_1_semi_auto_v3.ino` from its same-named folder. V2 remains
+available separately. V3 uses these pins from the updated v2 sketch:
+roll motors D13/D15, D9/D11, D19/D17; picture rotator `motor_4` D5/D7;
+roll IRs D27/D23/D43/D25; picture E18 D29; button D41; ButtonLED D39;
+position servo D21; cutting servo D31. V3 reports the cutting E18 on D45 to
+avoid the D43 conflict with `ir_3`; the cut still starts immediately after the
+third picture.
+
+At each of the four roll IRs, v3 stops the roll motors after a 30 ms stable
+trigger, waits 800 ms, then turns `motor_4` until the picture E18 clears and
+triggers again. Rotation then stops and the LED stays on while waiting for a
+button press. That press starts a five-second serial countdown; the LED blinks
+every 300 ms throughout it. At the end, the position servo moves from 40 to
+0 degrees, holds for one second, and returns to 40 degrees. The existing
+cutting cycle after the third picture and final 10-second roll remain in place.
+The waits use `millis()`, so `STOP` can cancel the cycle at any point.
