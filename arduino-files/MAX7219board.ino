@@ -1,7 +1,7 @@
 #include "LedControl.h"
 
 // Pin connections for Arduino Mega:
-// DIN = 12, CLK = 11, CS (LOAD) = 10
+// DIN = 33, CLK = 37, CS (LOAD) = 35
 // The '1' means we are only using one MAX7219 module
 LedControl lc = LedControl(33, 37, 35, 1);
 

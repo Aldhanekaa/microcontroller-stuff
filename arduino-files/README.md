@@ -146,14 +146,18 @@ roll motors D13/D15, D9/D11, D19/D17; picture rotator `motor_4` D5/D7;
 roll IRs D27/D23/D43/D25; picture E18 D29; button D41; ButtonLED D39;
 position servo D21; cutting servo D31. V3 reports the cutting E18 on D45 to
 avoid the D43 conflict with `ir_3`; the cut still starts immediately after the
-third picture.
+third picture. The MAX7219 uses DIN D33, CLK D37, and CS D35 and requires the
+`LedControl` library.
 
 At each of the four roll IRs, v3 stops the roll motors after a 30 ms stable
 trigger, waits 800 ms, then runs the picture rotation routine until the picture
 E18 clears and triggers again. Rotation then stops and the LED stays on while
 waiting for a button press. That press starts a five-second serial countdown;
-the LED blinks every 300 ms throughout it. At the end, the picture servo moves
-from 90 to 40 degrees, holds for one second, and returns to 90 degrees.
+the LED blinks every 300 ms throughout it. The MAX7219 wakes at minimum
+intensity and displays 5, 4, 3, 2, 1 on its rightmost digit. It shuts down
+before the picture servo moves from 90 to 40 degrees. The servo holds for one
+second, then returns to 90 degrees. The display is also shut down at startup
+and whenever `STOP` or `D` cancels the run.
 
 After the third picture, the position-controlled cutting servo on D31 moves
 from its 40-degree home angle to `CUT_ACTION_ANGLE` (90 degrees by default),

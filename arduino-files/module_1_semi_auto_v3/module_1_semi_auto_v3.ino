@@ -12,6 +12,7 @@
     cutting E18 = D45 (reported only). Sensor outputs are active LOW.
   Button = D41 to GND (INPUT_PULLUP); ButtonLED = D39 (HIGH = ON).
   Picture position servo = D21; cutting position servo = D31.
+  MAX7219 display: DIN D33, CLK D37, CS D35. Lit only for photo countdown.
 
   Use suitable external motor/servo supplies and a common Mega ground.
   Serial Monitor: 115200 baud, Newline or Both NL & CR.
@@ -24,6 +25,7 @@
 
 #include <Arduino.h>
 #include <Servo.h>
+#include <LedControl.h>
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +55,12 @@ const uint8_t BUTTON_PIN = 41;
 const uint8_t BUTTON_LED_PIN = 39;
 const uint8_t POSITION_SERVO_PIN = 21;
 const uint8_t CUTTING_SERVO_PIN = 31;
+const uint8_t DISPLAY_DIN_PIN = 33;
+const uint8_t DISPLAY_CLK_PIN = 37;
+const uint8_t DISPLAY_CS_PIN = 35;
+const uint8_t DISPLAY_DEVICE = 0;
+const uint8_t DISPLAY_DIGIT = 0;
+const uint8_t DISPLAY_MIN_INTENSITY = 0;
 const uint8_t SENSOR_ACTIVE_LEVEL = LOW;
 
 // Change these directions if physical wiring makes a motor turn the wrong way.
@@ -82,8 +90,8 @@ const unsigned long FINAL_LED_BLINK_MS = 1000UL;
 // Picture angles from v3 and cutter home angle from servo_rot_control.ino.
 const int POSITION_INITIAL_ANGLE = 90;
 const int POSITION_TRIGGER_ANGLE = 40;
-const int CUT_HOME_ANGLE = 40;
-const int CUT_ACTION_ANGLE = 90;  // Set for the installed cutting linkage.
+const int CUT_HOME_ANGLE = 0;
+const int CUT_ACTION_ANGLE = 180;  // Set for the installed cutting linkage.
 const unsigned long CUT_TO_ANGLE_MS = 1800UL;
 const unsigned long CUT_RETURN_MS = 1700UL;
 const unsigned long CUT_HOLD_MS = 250UL;
@@ -94,6 +102,7 @@ const int MANUAL_CUT_MAX_ANGLE = 180;
 
 Servo positionServo;
 Servo cuttingServo;
+LedControl countdownDisplay(DISPLAY_DIN_PIN, DISPLAY_CLK_PIN, DISPLAY_CS_PIN, 1);
 MotorDirection motorState[4] = {MOTOR_OFF, MOTOR_OFF, MOTOR_OFF, MOTOR_OFF};
 RunState runState = READY;
 uint8_t stationIndex = 0;  // 0..3 selects ir_1..ir_4.
@@ -106,6 +115,7 @@ bool buttonLastRaw = HIGH;
 bool buttonStable = HIGH;
 unsigned long buttonChangedMs = 0;
 bool ledOn = false;
+bool countdownDisplayOn = false;
 unsigned long ledLastToggleMs = 0;
 bool stopCommandThisLoop = false;
 char commandBuffer[48];
@@ -152,6 +162,27 @@ void stopAllMotors() {
 void setButtonLed(bool on) {
   ledOn = on;
   digitalWrite(BUTTON_LED_PIN, on ? HIGH : LOW);
+}
+
+// Keep the MAX7219 blank outside the five-second photo countdown.
+void hideCountdownDisplay() {
+  countdownDisplay.shutdown(DISPLAY_DEVICE, true);
+  countdownDisplayOn = false;
+}
+
+void startCountdownDisplay() {
+  hideCountdownDisplay();
+  countdownDisplay.setIntensity(DISPLAY_DEVICE, DISPLAY_MIN_INTENSITY);
+  countdownDisplay.clearDisplay(DISPLAY_DEVICE);
+  countdownDisplay.setDigit(DISPLAY_DEVICE, DISPLAY_DIGIT,
+                            PHOTO_COUNTDOWN_SECONDS, false);
+  countdownDisplay.shutdown(DISPLAY_DEVICE, false);
+  countdownDisplayOn = true;
+}
+
+void updateCountdownDigit(uint8_t secondsRemaining) {
+  countdownDisplay.setDigit(DISPLAY_DEVICE, DISPLAY_DIGIT,
+                            secondsRemaining, false);
 }
 
 // isActive: Read one active-LOW E18 sensor pin.
@@ -211,6 +242,7 @@ bool buttonPressed() {
 // and return to READY or DISABLED.
 void stopSystem(bool disable) {
   stopAllMotors();
+  hideCountdownDisplay();
   cuttingServo.write(CUT_HOME_ANGLE);
   positionServo.write(POSITION_INITIAL_ANGLE);
   sensorLowTiming = false;
@@ -360,8 +392,9 @@ void updatePictureRotation() {
 void startPictureCycle() {
   positionServo.write(POSITION_INITIAL_ANGLE);
   runState = PHOTO_COUNTDOWN;
-  stateStartedMs = millis();
   lastCountdownSecond = PHOTO_COUNTDOWN_SECONDS;
+  startCountdownDisplay();
+  stateStartedMs = millis();
   setButtonLed(false);
   ledLastToggleMs = stateStartedMs;
   Serial.print(F("Photo in "));
@@ -410,6 +443,7 @@ void updatePictureCycle() {
   if (runState == PHOTO_COUNTDOWN) {
     unsigned long elapsed = now - stateStartedMs;
     if (elapsed >= PHOTO_COUNTDOWN_MS) {
+      hideCountdownDisplay();
       positionServo.write(POSITION_TRIGGER_ANGLE);
       runState = PHOTO_SERVO_HOLD;
       stateStartedMs = now;
@@ -418,6 +452,7 @@ void updatePictureCycle() {
       uint8_t secondsRemaining = PHOTO_COUNTDOWN_SECONDS - (uint8_t)(elapsed / 1000UL);
       if (secondsRemaining != lastCountdownSecond) {
         lastCountdownSecond = secondsRemaining;
+        updateCountdownDigit(secondsRemaining);
         Serial.print(F("Photo in "));
         Serial.print(secondsRemaining);
         Serial.println(F("..."));
@@ -491,6 +526,8 @@ void printStatus() {
   }
   Serial.print(F("ButtonLED: "));
   Serial.println(ledOn ? F("ON") : F("OFF"));
+  Serial.print(F("Countdown display: "));
+  Serial.println(countdownDisplayOn ? F("ON") : F("OFF"));
   Serial.print(F("Cutter home/cut angles: "));
   Serial.print(CUT_HOME_ANGLE);
   Serial.print('/');
@@ -660,6 +697,9 @@ void updateState() {
 // setup: Configure all inputs/outputs, set servos to source start values,
 // initialize the button debounce state, and show that the system is READY.
 void setup() {
+  hideCountdownDisplay();
+  countdownDisplay.setIntensity(DISPLAY_DEVICE, DISPLAY_MIN_INTENSITY);
+  countdownDisplay.clearDisplay(DISPLAY_DEVICE);
   Serial.begin(115200);
   for (uint8_t i = 0; i < 4; ++i) {
     pinMode(MOTORS[i].in1, OUTPUT);
