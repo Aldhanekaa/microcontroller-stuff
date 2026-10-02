@@ -79,8 +79,8 @@ const unsigned long FINAL_RUN_MS = 10000UL;
 const unsigned long FINAL_LED_BLINK_MS = 1000UL;
 
 // Values from taking_picture_cycle.ino and cutting_cycle.ino.
-const int POSITION_INITIAL_ANGLE = 40;
-const int POSITION_TRIGGER_ANGLE = 0;
+const int POSITION_INITIAL_ANGLE = 90;
+const int POSITION_TRIGGER_ANGLE = 40;
 const int CUT_STOP_US = 1500;
 const int CUT_FORWARD_US = 1600;
 const int CUT_REVERSE_US = 1400;
@@ -307,7 +307,11 @@ void updateRollToStation() {
 // startPictureRotation: Turn motor_4 until D29 clears and triggers again.
 // Keep this autonomous rotation separate from the button-driven servo action.
 void startPictureRotation() {
-  setMotor(3, ROTATOR_DIRECTION);
+  // setMotor(3, ROTATOR_DIRECTION);
+  digitalWrite(9, LOW );
+  digitalWrite(11, HIGH);
+
+
   runState = isActive(PICTURE_CYCLE_E18_PIN) ? PHOTO_WAIT_CLEAR : PHOTO_ROTATING;
   stateStartedMs = millis();
   sensorLowTiming = false;
@@ -331,7 +335,9 @@ void updatePictureRotation() {
         sensorLowTiming = true;
         sensorLowStartedMs = now;
       } else if (now - sensorLowStartedMs >= ROLL_SENSOR_DEBOUNCE_MS) {
-        setMotor(3, MOTOR_OFF);
+        digitalWrite(9, LOW );
+        digitalWrite(11, LOW);
+
         sensorLowTiming = false;
         runState = WAIT_PHOTO_BUTTON;
         setButtonLed(true);
