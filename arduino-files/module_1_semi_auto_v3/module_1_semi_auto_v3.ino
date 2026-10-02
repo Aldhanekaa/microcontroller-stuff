@@ -335,6 +335,7 @@ void updatePictureRotation() {
         sensorLowTiming = true;
         sensorLowStartedMs = now;
       } else if (now - sensorLowStartedMs >= ROLL_SENSOR_DEBOUNCE_MS) {
+        delay(250);
         digitalWrite(9, LOW );
         digitalWrite(11, LOW);
 
